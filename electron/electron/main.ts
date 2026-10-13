@@ -21,8 +21,26 @@ import { spawn } from 'node:child_process';
 import { diskBuildDiffersFromRunning, readBuildMetaFile, resolveBuildMetaPath } from './buildIdentity';
 import { buildWorkspaceWindowSpawnPlan, DesktopWorkspaceService, findWorkspaceFileArgument, getArgumentValue } from './workspaceService';
 import { CloudAccountService } from './cloudAccountService';
+import {
+  CLOUD_REFRESH_TOKEN_FILE_NAME,
+  clearSharedCredential,
+  migrateLegacyCloudCredentialIfNeeded,
+  readSharedCredentialBytes,
+  resolveSharedCloudCredentialDir,
+  withCloudCredentialLock,
+  writeSharedCredentialBytes
+} from './cloudCredentialStore';
 import { checkLatestVersion, type VersionCheckResult } from './versionCheckService';
-import { UpdateDownloadService } from './updateDownloadService';
+import { UpdateDownloadService, verifyInstallerSha256, normalizeUpdaterSha256 } from './updateDownloadService';
+import {
+  clearUpdateAttemptMarker,
+  evaluateUpdateAttempt,
+  formatUpdateAttemptFailureMessage,
+  planUpdateAttemptStartup,
+  readUpdateAttemptMarker,
+  writeUpdateAttemptMarker,
+  type UpdateAttemptMarker
+} from './updateAttemptService';
 import { AiBridgeManagerService, type ManagedAiBridgePermission, type ManagedAiBridgeLifecycle } from './aiBridgeManagerService';
 import { normalizeAiBridgeStartSettings, readAiBridgeStartSettings, resolveAiBridgeStartSettingsPath, writeAiBridgeStartSettings } from './aiBridgeStartSettings';
 import { removeLegacyAgentRuntimeArtifacts } from './agentRuntimeLegacyCleanup';
@@ -310,9 +328,29 @@ function skillKitService(): SkillKitService {
   }
   return skillKit;
 }
+// 登录凭据存储（2026-10-11 起迁到机器级共享目录，见 cloudCredentialStore.ts）：
+// 「在新窗口打开工作区」/例程实例带 LINGBUILDER_REC_USER_DATA 独立 userData，
+// 凭据留在 userData 内它们打开即未登录；机器级共享 + 跨进程刷新锁让一处登录处处登录，
+// 且同一刷新令牌绝不被两个实例先后发给云端（云端重复使用检测会撤销全会话族）。
+// 旧 userData 内的凭据在首次读取时一次性迁移（move）；cloudRefreshPath 仅作迁移源保留。
 function cloudRefreshPath(): string { return path.join(app.getPath('userData'), 'credentials', 'cloud-refresh-token.bin'); }
-async function readCloudRefresh(): Promise<string> { try { if (!safeStorage.isEncryptionAvailable()) return ''; return safeStorage.decryptString(await fs.readFile(cloudRefreshPath())); } catch { return ''; } }
-async function writeCloudRefresh(value: string): Promise<void> { if (!safeStorage.isEncryptionAvailable()) throw new Error('当前系统不支持安全账号凭据存储。'); const file = cloudRefreshPath(); await fs.mkdir(path.dirname(file), { recursive: true }); if (!value) { await fs.rm(file, { force: true }); return; } const temporary = `${file}.${crypto.randomUUID()}.tmp`; await fs.writeFile(temporary, safeStorage.encryptString(value)); await fs.rename(temporary, file); }
+function sharedCloudCredentialDir(): string { return resolveSharedCloudCredentialDir(app.isPackaged); }
+async function readCloudRefresh(): Promise<string> {
+  if (!safeStorage.isEncryptionAvailable()) return '';
+  let bytes = await readSharedCredentialBytes(sharedCloudCredentialDir(), CLOUD_REFRESH_TOKEN_FILE_NAME);
+  if (!bytes) {
+    await migrateLegacyCloudCredentialIfNeeded(sharedCloudCredentialDir(), cloudRefreshPath());
+    bytes = await readSharedCredentialBytes(sharedCloudCredentialDir(), CLOUD_REFRESH_TOKEN_FILE_NAME);
+  }
+  if (!bytes) return '';
+  try { return safeStorage.decryptString(bytes); } catch { return ''; }
+}
+async function writeCloudRefresh(value: string): Promise<void> {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('当前系统不支持安全账号凭据存储。');
+  // 写入/清除的跨进程互斥由 CloudAccountService 的 withCredentialLock 在调用侧保证（刷新/登录/退出临界区）。
+  if (!value) { await clearSharedCredential(sharedCloudCredentialDir(), CLOUD_REFRESH_TOKEN_FILE_NAME); return; }
+  await writeSharedCredentialBytes(sharedCloudCredentialDir(), CLOUD_REFRESH_TOKEN_FILE_NAME, safeStorage.encryptString(value));
+}
 function modulePermitCachePath(): string { return path.join(app.getPath('userData'), 'credentials', 'module-permits.bin'); }
 // Pro 会员授权状态落盘（镜像 src/services/modules/proAccessStateFile.ts 的文件名与格式；
 // 主进程 tsconfig rootDir 不含 src，只能镜像——与 ideVersion 同一口径）：
@@ -388,7 +426,13 @@ function cloudApiOrigin(): string {
     return 'https://cloud-config-missing.invalid';
   }
 }
-const cloudAccountService = new CloudAccountService(cloudApiOrigin(), readCloudRefresh, writeCloudRefresh);
+const cloudAccountService = new CloudAccountService(
+  cloudApiOrigin(),
+  readCloudRefresh,
+  writeCloudRefresh,
+  // 多实例共享凭据的跨进程互斥锁：刷新/登录/退出的「重读→请求→写回」整体临界区。
+  <T>(work: () => Promise<T>) => withCloudCredentialLock(sharedCloudCredentialDir(), work)
+);
 let lastVersionCheck: VersionCheckResult | null = null;
 /** 应用内更新下载器：安装包落在 userData/updates，进度经 app-update:progress 广播到所有窗口。 */
 const updateDownloadService = new UpdateDownloadService({
@@ -975,8 +1019,29 @@ function registerIpcHandlers(): void {
   ipcMain.handle('app:update:status', () => updateDownloadService.status());
   ipcMain.handle('app:update:install', async () => {
     const result = await updateDownloadService.install();
-    if (result.ok) void shutdownAndExit(0);
+    if (result.ok) {
+      // 安装器已拉起、IDE 即将退出：写入「安装尝试」标记，供下次启动比对版本判断更新是否真正生效
+      //（安装器对被锁核心文件可能假成功——外部 AI 客户端复活的 MCP 宿主会锁住 exe/app.asar）。
+      const progress = updateDownloadService.status();
+      if (progress.installerPath && progress.version) {
+        await writeUpdateAttemptMarker(app.getPath('userData'), {
+          version: progress.version,
+          installerPath: progress.installerPath,
+          sha256: normalizeUpdaterSha256(lastVersionCheck?.sha256) || '',
+          at: new Date().toISOString()
+        }).catch(() => undefined);
+      }
+      void shutdownAndExit(0);
+    }
     return result;
+  });
+  ipcMain.handle('app:update:verify-attempt', async () => {
+    const marker = await readUpdateAttemptMarker(app.getPath('userData')).catch(() => null);
+    const status = evaluateUpdateAttempt(app.getVersion(), marker);
+    if (!status.pending || status.tookEffect || !marker) return status;
+    const retained = Boolean(marker.installerPath)
+      && await fs.stat(marker.installerPath).then(stat => stat.isFile()).catch(() => false);
+    return { ...status, message: formatUpdateAttemptFailureMessage(marker, retained ? marker.installerPath : '') };
   });
   ipcMain.handle('payments:open-page', async (_event, url: string) => {
     try {
@@ -1774,7 +1839,35 @@ app.whenReady().then(async () => {
   diagnosticLog = new DiagnosticLogService(getDiagnosticLogDirectory());
   logDiagnostic('info', 'app', `LingBuilder ${app.getVersion()} 启动（${process.platform} ${process.arch}，${app.isPackaged ? '安装版' : '开发版'}）。`);
   attachAppDiagnosticListeners();
-  void updateDownloadService.cleanupAbandoned();
+  // 安装器「改名让位」修复可能留下被锁旧文件（.lb-stale）；此刻进程均已换新，best-effort 清理。
+  for (const staleRelative of ['resources/app.asar.lb-stale', 'LingBuilder.exe.lb-stale']) {
+    void fs.rm(path.join(path.dirname(process.execPath), staleRelative), { force: true }).catch(() => undefined);
+  }
+  // 更新安装尝试校验：上次点过「安装更新」但版本没变 ⇒ 安装未生效（核心文件被外部 AI 客户端
+  // 复活的 MCP 宿主占用）。此时保留已下载安装包并收养为「已就绪」，界面给出明确错误与一键
+  // 重试；而不是清掉 updates 目录让用户重新下载 200MB 进入死循环。
+  const startupUpdateAttemptMarker: UpdateAttemptMarker | null = await readUpdateAttemptMarker(app.getPath('userData')).catch(() => null);
+  const startupUpdateAttemptPlan = planUpdateAttemptStartup(app.getVersion(), startupUpdateAttemptMarker);
+  if (startupUpdateAttemptPlan === 'cleanup-only') {
+    void updateDownloadService.cleanupAbandoned();
+  } else if (startupUpdateAttemptPlan === 'clear-marker-and-cleanup') {
+    await clearUpdateAttemptMarker(app.getPath('userData'));
+    void updateDownloadService.cleanupAbandoned();
+  } else if (startupUpdateAttemptMarker) {
+    void (async () => {
+      const retainedPath = startupUpdateAttemptMarker.installerPath;
+      const retainedUsable = Boolean(retainedPath)
+        && await fs.stat(retainedPath).then(stat => stat.isFile()).catch(() => false)
+        && (!startupUpdateAttemptMarker.sha256 || await verifyInstallerSha256(retainedPath, startupUpdateAttemptMarker.sha256));
+      if (retainedUsable && retainedPath) {
+        updateDownloadService.adoptRetainedInstaller(retainedPath, startupUpdateAttemptMarker.version);
+      } else {
+        // 安装包已丢失或校验不过：清标记走正常清理，界面回落到普通更新流程。
+        await clearUpdateAttemptMarker(app.getPath('userData'));
+        void updateDownloadService.cleanupAbandoned();
+      }
+    })();
+  }
   const smokeDocumentsPath = process.argv.includes('--smoke-test')
     ? getArgumentValue(process.argv, '--smoke-documents-dir')
     : undefined;
