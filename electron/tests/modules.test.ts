@@ -540,12 +540,35 @@ test('全部内置方法的控件参数统一使用 controlRef、裸补全和明
       // 基线 2026-10-15 写回（SSE 单向推送批次）：lingbuilder.http.server 2.1.0→2.2.0 新增
       // 7 命令 10 参数（HTTP_SSE_开始/推送/推送事件/推送心跳/结束/是否连接/取连接数，
       // 请求与服务端句柄为名义类型，无 controlRef）（实算摘要 0a3297a5/7d39a0d8）。
-      modules: 102,
-      commands: 4106,
-      parameters: 7204,
-      controlReferences: 1345,
-      commandDigest: '0a3297a5',
-      parameterDigest: '7d39a0d8'
+      // 基线 2026-10-17 写回（win32.basic 运行期专属属性批次）：lingbuilder.win32.basic 1.1.0
+      // 新增 11 命令 24 参数（控件_设置只读/设置密码输入/设置提示文字/设置数值范围/
+      // 设置不确定进度/插入项目/删除项目/修改项目/取项目文本/取项目数量/设置表项高度，
+      // 每条首参均为 controlRef，控件参数 +11）（实算摘要 7452a355/6bec5d4b）。
+      // 基线 2026-10-17 再写回（自绘层批次）：同模块新增 9 命令 21 参数（控件_设置选中颜色/
+      // 设置选中标记颜色/设置边框/设置标题对齐/设置文本对齐/设置填充方式/播放/暂停/
+      // 设置循环播放，颜色参数为 "#RRGGBB" 文本，每条首参均为 controlRef，控件参数 +9）
+      //（实算摘要 6ac8a152/5b5de579）。
+      // 基线 2026-10-17 三写回（common-controls 第三批）：lingbuilder.win32.common-controls
+      // 新增 10 命令 17 参数（滑块_置/取刻度间隔、日期时间选择器_置日期/取日期/置显示格式、
+      // 月历_置日期/取日期/置选中范围、富文本框_置/取RTF文本，每条首参均为 controlRef，控件参数 +10）
+      //（实算摘要 20f79191/3d0d76e7）。
+      // 基线 2026-10-17 四写回（消息推送模块批次）：新增 lingbuilder.notify 1.0.0（消息推送模块），
+      // 17 命令 55 参数（通用 3 + 企业微信 6 + 钉钉 6 + 飞书 2，全部文本/数值/布尔参数，无 controlRef；
+      // #推送_默认超时毫秒 常量不计命令）
+      //（实算摘要 b5b65530/7272074a）。
+      // 基线 2026-10-18 写回（取数据地址命令批次）：std.bytes 1.3.0→1.4.0 新增 字节集_取数据地址（1 参数）、
+      // std.text 1.3.0→1.4.0 新增 文本_取数据地址（1 参数），返回缓冲区首地址供 DLL 指针整数互操作，
+      // 无 controlRef（实算摘要 702276cc/ae6dc534）。
+      // 基线 2026-10-18 再写回（HTTP 接口文档批次）：lingbuilder.http.server 2.2.0→2.3.0 新增
+      // 5 命令 23 参数（HTTP_启用接口文档 3/HTTP_登记接口 5/HTTP_登记接口参数 8/
+      // HTTP_登记接口示例 6/HTTP_取接口文档JSON 1，句柄与文本/整数/布尔参数，无 controlRef），
+      // 另登记 #接口参数_路径/查询/请求头 三常量（不计命令）（实算摘要 501d290f/9c29e24c）。
+      modules: 103,
+      commands: 4160,
+      parameters: 7346,
+      controlReferences: 1375,
+      commandDigest: '501d290f',
+      parameterDigest: '9c29e24c'
     },
     '内置模块的每个方法和每个参数必须进入稳定 controlRef 审计目录'
   );
@@ -688,7 +711,8 @@ test('模块源目录中的 controlRef 补全、示例和代码片段全部保�
   // 模块源文件，按当前工作区内容实算写回（全量字面量扫描 0 违规）。
   // 2026-10-01 写回 67→68：新增二维码模块 qrcodeModules.ts（全量字面量扫描 0 违规）。
   // 2026-10-06 写回 68→69：新增 proAccessStateFile.ts（Pro 会员授权状态落盘，无 controlRef 字面量；全量字面量扫描 0 违规）。
-  assert.equal(sourceFiles.length, 69, '模块源文件数量变化时必须重新确认 controlRef 源字面量覆盖范围');
+  // 2026-10-17 写回 69→70：新增消息推送模块 notifyModule.ts（全部文本/数值/布尔参数，无 controlRef 字面量；全量字面量扫描 0 违规）。
+  assert.equal(sourceFiles.length, 70, '模块源文件数量变化时必须重新确认 controlRef 源字面量覆盖范围');
   assert.deepEqual(violations, []);
 
   const unsafe = 'const command = { insertText: \'控件_设置文本("操作结果", "$2")\' };';
@@ -1049,12 +1073,30 @@ test('工作区已安装模块全部通过 controlRef 清单和示例门禁', as
       // 基线 2026-10-15 写回（SSE 单向推送批次）：内置 +7 命令 +10 参数
       //（lingbuilder.http.server 2.2.0 SSE 命令族，见上一用例）；本机磁盘仍为 11 份清单，
       // 磁盘侧 0 漂移（实算摘要 52e69486/5be22410）。
-      modules: 113,
-      commands: 8191,
-      parameters: 19468,
-      controlReferences: 5126,
-      commandDigest: '52e69486',
-      parameterDigest: '5be22410'
+      // 基线 2026-10-17 写回（win32.basic 运行期专属属性批次）：内置 +11 命令 +24 参数
+      //（lingbuilder.win32.basic 控件_运行期属性/项目操作族，见上一用例）；
+      // 本机磁盘仍为 11 份清单，磁盘侧 0 漂移（实算摘要 4c0ed6d4/5ee9bc73）。
+      // 基线 2026-10-17 再写回（自绘层批次）：内置 +9 命令 +21 参数
+      //（lingbuilder.win32.basic 控件_自绘属性/播放控制族，见上一用例）；
+      // 本机磁盘仍为 11 份清单，磁盘侧 0 漂移（实算摘要 af69ce81/8881b411）。
+      // 基线 2026-10-17 三写回（common-controls 第三批）：内置 +10 命令 +17 参数
+      //（lingbuilder.win32.common-controls 滑块/日期时间/月历/富文本运行期族，见上一用例）；
+      // 本机磁盘仍为 11 份清单，磁盘侧 0 漂移（实算摘要 671c137e/89490fff）。
+      // 基线 2026-10-17 四写回（消息推送模块批次）：内置 +17 命令 +55 参数
+      //（新增 lingbuilder.notify 1.0.0 消息推送模块，见上一用例）；
+      // 本机磁盘仍为 11 份清单，磁盘侧 0 漂移（实算摘要 eed225cd/343bc9fe）。
+      // 基线 2026-10-18 写回（取数据地址命令批次）：内置 +2 命令 +2 参数
+      //（std.bytes/std.text 各新增一条 取数据地址，见上一用例）；本机磁盘仍为 11 份清单，磁盘侧 0 漂移
+      //（实算摘要 f75275cd/8ea2b18a）。
+      // 基线 2026-10-18 再写回（HTTP 接口文档批次）：内置 +5 命令 +23 参数
+      //（lingbuilder.http.server 2.3.0 接口文档命令族，见上一用例）；本机磁盘仍为 11 份清单，
+      // 磁盘侧 0 漂移（实算摘要 968d2ab8/b6bc2822）。
+      modules: 114,
+      commands: 8245,
+      parameters: 19610,
+      controlReferences: 5156,
+      commandDigest: '968d2ab8',
+      parameterDigest: 'b6bc2822'
   }, '内置、官方和当前工作区第三方模块的每个方法与参数都必须进入全量审计');
   // OpenCV 以内置清单为准：本机未装 SDK 时磁盘上的同名清单是只有骨架的占位包（0 命令、无 targets）。
   const manifest = BUILTIN_MODULES.find(module => module.id === OPENCV_MODULE_ID) || auditedManifests.get('lingbuilder.opencv.sdk');
@@ -1201,6 +1243,48 @@ test('字节集十六进制编码改名带别名，并提供一步到位的十�
   assert.ok(cpp.includes('编码结果 = 字节集_到十六进制字节集(数据);'), '旧名别名调用必须生成新名 C++ 函数');
   assert.ok(cpp.includes('调试输出(字节集_到十六进制文本(数据));'), '一步十六进制文本命令必须确定性生成');
   assert.ok(cpp.includes('const wchar_t* 字节集_到十六进制文本(const std::vector<unsigned char>& bytes)'), '运行时必须随包下发文本版实现');
+});
+
+test('取数据地址命令把字节集/文本缓冲区首地址递给 DLL 指针整数互操作', () => {
+  const bytesManifest = STANDARD_LIBRARY_MODULES.find(module => module.id === 'lingbuilder.std.bytes')!;
+  const textManifest = STANDARD_LIBRARY_MODULES.find(module => module.id === 'lingbuilder.std.text')!;
+  const bytesCommand = bytesManifest.contributes?.commands?.find(command => command.name === '字节集_取数据地址');
+  const textCommand = textManifest.contributes?.commands?.find(command => command.name === '文本_取数据地址');
+  assert.ok(bytesCommand, '字节集_取数据地址 必须存在');
+  assert.ok(textCommand, '文本_取数据地址 必须存在');
+  assert.equal(bytesCommand.returnType, '长整数型');
+  assert.equal(textCommand.returnType, '长整数型');
+  // 红线必须写进描述：地址生命周期（失效场景）与用途（指针整数形参）都是外部 AI 消费口径。
+  assert.match(bytesCommand.description, /指针整数/u);
+  assert.match(bytesCommand.description, /失效/u);
+  assert.match(textCommand.description, /指针整数/u);
+  assert.match(textCommand.description, /当条语句/u);
+  assert.equal(bytesManifest.version, '1.4.0');
+  assert.equal(textManifest.version, '1.4.0');
+
+  const module: InstalledModule = { manifest: bytesManifest, installPath: `builtin://${bytesManifest.id}`, isBuiltin: true, isInstalled: true, isEnabledForProject: true, diagnostics: [] };
+  const textModule: InstalledModule = { manifest: textManifest, installPath: `builtin://${textManifest.id}`, isBuiltin: true, isInstalled: true, isEnabledForProject: true, diagnostics: [] };
+  const generated = generateLingCppNativeWin32Project(sampleProject, {
+    enabledModules: [module, textModule],
+    lingCppSourceCode: [
+      '类 MainWindow',
+      '    事件 _MainWindow_创建完毕()',
+      '        局部 字节集 数据',
+      '        局部 长整数型 数据地址',
+      '        局部 长整数型 文本地址',
+      '        数据 = 字节集_从文本("ab")',
+      '        数据地址 = 字节集_取数据地址(数据)',
+      '        文本地址 = 文本_取数据地址("AB")',
+      '        调试输出(数据地址 > 0)',
+      '    结束',
+      '结束类'
+    ].join('\n')
+  });
+  const cpp = generated.files.filter(file => file.relativePath === 'lingbuilder_runtime.h' || file.relativePath === 'main.cpp').map(file => file.content).join('\n');
+  assert.ok(cpp.includes('数据地址 = 字节集_取数据地址(数据);'), '取数据地址必须确定性生成同名 C++ 调用');
+  assert.match(cpp, /文本地址 = 文本_取数据地址\(/u, '文本版地址命令必须生成调用');
+  assert.ok(cpp.includes('long long 字节集_取数据地址(const std::vector<unsigned char>& bytes)'), '字节集版运行时必须随包下发');
+  assert.ok(cpp.includes('long long 文本_取数据地址(const wchar_t* text)'), '文本版运行时必须随包下发');
 });
 
 test('数组操作模块对元素类型透明地提供成员数、增删改查、排序和重定义', async () => {
@@ -1804,7 +1888,7 @@ test('Win32 基础模块提供不冻结界面的延时、延迟调用与时钟�
 
 test('网络基础模块提供请求、状态、错误和关闭闭环', () => {
   assert.deepEqual(NETWORK_LIBRARY_MODULES.map(module => module.id), [
-    'lingbuilder.net.http-client', 'lingbuilder.cdp.client', 'lingbuilder.web.http', 'lingbuilder.net.tcp', 'lingbuilder.net.udp',
+    'lingbuilder.net.http-client', 'lingbuilder.cdp.client', 'lingbuilder.web.http', 'lingbuilder.notify', 'lingbuilder.net.tcp', 'lingbuilder.net.udp',
     'lingbuilder.net.dns', 'lingbuilder.net.url', 'lingbuilder.net.cookie', 'lingbuilder.net.ftp',
         'lingbuilder.net.pop3', 'lingbuilder.net.imap'
   ]);
@@ -2442,7 +2526,8 @@ test('模块封装清单覆盖实际内置模块注册表', async () => {
   assert.ok(checklist.includes(`${BUILTIN_MODULES.length} 个内置模块、${commandCount} 条中文命令`));
   assert.match(checklist, /51 个模块、336 条命令/u);
   assert.match(checklist, /`lingbuilder\.std\.encoding` \| 编码转换模块 \| 32/u);
-  assert.match(checklist, /`lingbuilder\.win32\.basic` \| Win32 窗口基础模块 \| 221/u);
+  assert.match(checklist, /`lingbuilder\.win32\.basic` \| Win32 窗口基础模块 \| 241/u);
+  assert.match(checklist, /`lingbuilder\.win32\.common-controls` \| Win32 高级控件模块 \| 560/u);
   for (const manifest of BUILTIN_MODULES) {
     assert.ok(checklist.includes(`\`${manifest.id}\``), `封装清单缺少 ${manifest.id}`);
   }
@@ -5000,18 +5085,22 @@ test('built-in HTTP and WebSocket server modules contribute managed commands and
   assert.ok(!completions.some(item => item.label === 'HTTP_启动服务'));
   assert.ok(completions.some(item => item.label === 'HTTP_创建服务'));
   assert.ok(completions.some(item => item.label === 'HTTP_SSE_开始'));
+  assert.ok(completions.some(item => item.label === 'HTTP_启用接口文档'));
+  assert.ok(completions.some(item => item.label === '#接口参数_路径'));
   assert.ok(completions.some(item => item.label === 'HTTP 受管 JSON 服务'));
   assert.ok(completions.some(item => item.label === 'HTTP SSE 单向推送（服务端 → 客户端）'));
+  assert.ok(completions.some(item => item.label === 'HTTP 接口文档一站托管（OpenAPI + Swagger UI）'));
   assert.ok(completions.some(item => item.label === 'WSS_创建服务'));
   assert.ok(completions.some(item => item.label === 'WebSocket 受管消息服务'));
   assert.ok(!completions.some(item => item.label === 'WSS_启动服务'));
 
   const httpCommands = httpManifest.contributes?.commands || [];
   const httpBindings = httpManifest.bindings?.commands || [];
-  assert.equal(httpManifest.version, '2.2.0');
-  assert.equal(HTTP_SERVER_COMMAND_SPECS.length, 58);
-  assert.equal(httpCommands.length, 58);
-  assert.equal(httpBindings.length, 58);
+  assert.equal(httpManifest.version, '2.3.0');
+  assert.equal(HTTP_SERVER_COMMAND_SPECS.length, 63);
+  assert.equal(httpCommands.length, 63);
+  assert.equal(httpBindings.length, 63);
+  assert.deepEqual(httpManifest.contributes?.constants?.map(item => item.name), ['接口参数_路径', '接口参数_查询', '接口参数_请求头']);
   assert.deepEqual(new Set(httpCommands.map(item => item.name)), new Set(httpBindings.map(item => item.command)));
   assert.deepEqual(httpManifest.contributes?.types?.map(item => item.name), ['HTTP服务端', 'HTTP请求']);
   assert.deepEqual(httpManifest.contributes?.docs, [{ title: 'HTTP 服务端模块使用说明', path: 'docs/modules/http-server/README.md' }]);
