@@ -219,3 +219,5 @@ COMPONENT_CARDS_PLAN.md
 # LCPP 源码包导出验证产物与一次性导出脚本（不入库）
 /electron/lingbuilder-project.lcpppkg
 /electron/scripts/tmp-export-lcpppkg.ts
+
+# 伴生 APK 成品：按用户要求随仓库分发便于直接下载（仅归档在 companion/ 根，构建输出在工程内仍忽略）
