@@ -65,6 +65,7 @@ import LingCppStructureEditor from './LingCppStructureEditor';
 import ProjectGlobalVariableEditor from './ProjectGlobalVariableEditor';
 import ProjectDataTypeEditor from './ProjectDataTypeEditor';
 import ProjectDllCommandsEditor from './ProjectDllCommandsEditor';
+import ProjectCppSourceLibraryEditor from './ProjectCppSourceLibraryEditor';
 import {
   DIFF_VIEW_MODE_CHANGE_EVENT,
   type DiffViewMode
@@ -141,6 +142,7 @@ import { normalizeIdentifier, parseLingCpp } from '../services/lingCpp/parser';
 import { collectProjectDeclarationContexts, isProjectGlobalsFilePath } from '../services/lingCpp/projectGlobalService';
 import { isProjectDataTypesFilePath } from '../services/lingCpp/projectDataTypeService';
 import { isProjectDllCommandsFilePath } from '../services/lingCpp/projectDllCommandService';
+import { isProjectCppSourceLibraryFilePath } from '../services/lingCpp/projectCppSourceLibraryService';
 import { createProjectFunctionContext } from '../services/lingCpp/functionLibraryService';
 import { fetchWithSdkDependencies } from '../services/sdkDependencies/sdkDependencyClient';
 import { getLingCppParameterElementType, isLingCppArrayParameterType, setLingCppArrayParameterType } from '../services/lingCpp/parameterTypeService';
@@ -289,6 +291,7 @@ interface DiffViewerProps {
   onUpdateProjectSources?: (sources: Array<{ filePath: string; sourceCode: string }>) => void;
   onOpenProjectDataTypes?: () => void;
   onOpenProjectDllCommands?: () => void;
+  onOpenProjectCppSourceLibrary?: () => void;
   isDarkMode: boolean;
   activeFile?: any;
   editorFontSize?: number;
@@ -1628,6 +1631,7 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
   onUpdateProjectSources,
   onOpenProjectDataTypes,
   onOpenProjectDllCommands,
+  onOpenProjectCppSourceLibrary,
   isDarkMode,
   activeFile,
   editorFontSize = 13,
@@ -2302,6 +2306,7 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
     [activeFile?.path, allFiles, normalizedSourceCode]
   );
   const isActiveProjectDllCommandsFile = Boolean(activeFile?.path && isProjectDllCommandsFilePath(String(activeFile.path)));
+  const isActiveProjectCppSourceLibraryFile = Boolean(activeFile?.path && isProjectCppSourceLibraryFilePath(String(activeFile.path)));
   const lingCppProjectSources = useMemo(() => allFiles
     .filter(file => file.language === 'lingcpp' || String(file.path || '').toLocaleLowerCase().endsWith('.lcpp'))
     .map(file => ({
@@ -2346,7 +2351,7 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
         blocks.push({
           targetKey,
           bodyText: beginnerCodeDrafts[targetKey]
-            ?? `${statements.map(statement => statement.text).join('\n').replace(/\s+$/u, '')}`,
+            ?? `${statements.map(statement => `${statement.text}${statement.trailingComment || ''}`).join('\n').replace(/\s+$/u, '')}`,
           sourceLineMap: getBeginnerBodySourceLines(statements)
         });
       }
@@ -5082,7 +5087,7 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
     );
     const baseIndent = Number.isFinite(baseIndentLength) ? baseIndentLength : 0;
     const relativeLines = method.statements.map(statement =>
-      `${statement.indent.slice(Math.min(baseIndent, statement.indent.length))}${statement.text}`
+      `${statement.indent.slice(Math.min(baseIndent, statement.indent.length))}${statement.text}${statement.trailingComment || ''}`
     );
     return formatBeginnerFlowIndentation(relativeLines).join('\n').replace(/\s+$/u, '');
   };
@@ -11369,7 +11374,15 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
       const ctrlHoverSpan = beginnerCtrlHoverSpan?.targetKey === targetKey
         ? `${beginnerCtrlHoverSpan.segmentId}:${beginnerCtrlHoverSpan.start}:${beginnerCtrlHoverSpan.end}`
         : '';
-      return `|h:${hovered}|a:${active}|c:${completion}|l:${autoLocal}|d:${draftLength}|u:${ctrlHoverSpan}`;
+      // 展开层参数草稿的「值」必须进所属块切片：受控 input 的 value 来自这份草稿，
+      // 只把键放进全局 blockRevision（11340 行）时，第二次击键起块被记忆化外壳跳过、
+      // input fiber 持旧 props，React 事件后按旧值回写 DOM——实测第二个字符起输入被吞，
+      // 中文输入法组合态同样被掐断（2026-10-27 用户报告 + CDP 真机插桩实锤）。
+      const commandArgumentDrafts = Object.entries(beginnerCommandArgumentDrafts)
+        .filter(([draftKey]) => draftKey.startsWith(`${targetKey}:`))
+        .map(([draftKey, value]) => `${draftKey}=${value}`)
+        .join('|');
+      return `|h:${hovered}|a:${active}|c:${completion}|l:${autoLocal}|d:${draftLength}|u:${ctrlHoverSpan}|g:${commandArgumentDrafts}`;
     };
     const pushCanvasItem = (
       key: string,
@@ -12726,6 +12739,17 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
               <span>命令</span>
             </button>
           )}
+          {onOpenProjectCppSourceLibrary && editorExperienceMode === 'beginner' && viewType === 'code' && activeFile?.language === 'lingcpp' && isActiveProjectCppSourceLibraryFile && (
+            <button
+              type="button"
+              onClick={onOpenProjectCppSourceLibrary}
+              className={`flex items-center gap-1 rounded border px-2.5 py-1 text-[10px] font-medium ${isDarkMode ? 'border-sky-500/30 bg-sky-600/10 text-sky-300 hover:bg-sky-600/20' : 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100'}`}
+              title="打开项目 C++ 源码库声明"
+            >
+              <span className="font-semibold">C++</span>
+              <span>源码库</span>
+            </button>
+          )}
           {onOpenProjectDataTypes && editorExperienceMode === 'beginner' && viewType === 'code' && activeFile?.language === 'lingcpp' && (
             <button
               type="button"
@@ -12928,6 +12952,15 @@ const DiffViewer = React.forwardRef<DiffViewerHandle, DiffViewerProps>(function 
             <div className="flex-1 min-h-0 flex overflow-hidden">
               {isActiveProjectDllCommandsFile ? (
                 <ProjectDllCommandsEditor
+                  sourceCode={normalizedSourceCode}
+                  filePath={activeFile?.path}
+                  isDarkMode={isDarkMode}
+                  readOnly={!onUpdateSourceContent}
+                  commandService={commandService}
+                  onChange={updateSourceCode}
+                />
+              ) : isActiveProjectCppSourceLibraryFile ? (
+                <ProjectCppSourceLibraryEditor
                   sourceCode={normalizedSourceCode}
                   filePath={activeFile?.path}
                   isDarkMode={isDarkMode}

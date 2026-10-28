@@ -5,6 +5,12 @@ import {
   LingCppAstNodeKind,
   LingCppClass,
   LingCppConstant,
+  LingCppCppSourceCommand,
+  LingCppCppClass,
+  LingCppCppClassMethod,
+  LingCppCppSourceLibrary,
+  LingCppCppSourceStruct,
+  LingCppCppSourceStructField,
   LingCppDataField,
   LingCppDataType,
   LingCppDiagnostic,
@@ -113,6 +119,52 @@ export function isLingCppCommentLine(line: string): boolean {
   return trimmed.startsWith('//') || trimmed === '注释' || trimmed.startsWith('注释 ');
 }
 
+/**
+ * 去掉一行代码末尾的 `//` 行尾注释，返回纯代码部分（含原始缩进）。
+ * 引号（半角/中文弯引号）与反斜杠转义内的 `//` 不算注释；圆括号/中文括号内
+ * 的 `//` 也不算——C++ 源码库命令声明的形参备注语法是 `命令(整数型 x // 说明, …)`，
+ * 必须原样保留给声明解析器。找不到符合条件的行尾注释时原样返回。
+ */
+export function stripLingCppTrailingLineComment(line: string): string {
+  let inDoubleQuote = false;
+  let inChineseQuote = false;
+  let depth = 0;
+  for (let index = 0; index < line.length - 1; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '\\' && (inDoubleQuote || inChineseQuote)) {
+      index += 1;
+      continue;
+    }
+    if (!inChineseQuote && char === '"') {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (!inDoubleQuote && char === '“') {
+      inChineseQuote = true;
+      continue;
+    }
+    if (inChineseQuote && char === '”') {
+      inChineseQuote = false;
+      continue;
+    }
+    if (inDoubleQuote || inChineseQuote) continue;
+    if (char === '(' || char === '（') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')' || char === '）') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && char === '/' && next === '/') {
+      return line.slice(0, index).replace(/[ \t]+$/u, '');
+    }
+  }
+  return line;
+}
+
+
 /** Read the single declaration note immediately preceding a source line. */
 export function readLingCppDeclarationNote(lines: string[], lineNumber: number): string | undefined {
   for (let index = lineNumber - 2; index >= 0; index -= 1) {
@@ -195,6 +247,101 @@ const DLL_LOAD_MODE_RE = /^加载方式\s*[=＝]\s*(内存|内存加载|文件|�
 const DLL_PUBLIC_RE = /^公开\s*=\s*(真|假)$/u;
 const DLL_REMARK_RE = /^备注\s*[:：]?\s*(.+)$/u;
 const DLL_COMMAND_RE = new RegExp(`^(空|${TYPE_EXPRESSION_SOURCE})\\s+(${TYPE_NAME_SOURCE})\\s*[（(]([^）)]*)[）)](?:\\s*=\\s*(${TYPE_NAME_SOURCE}))?(?:\\s+(cdecl|stdcall))?$`, 'u');
+/** C++源码库 开块：`C++源码库 名称`。 */
+const CPP_SOURCE_LIBRARY_RE = new RegExp(`^C\\+\\+源码库\\s+(${TYPE_NAME_SOURCE})$`, 'u');
+/** C++源码库 内 `源码 = xxx.cpp`：参与编译的源码文件（项目内相对路径）。 */
+const CPP_SOURCE_FILE_RE = /^源码\s*=\s*(.+)$/u;
+/** C++源码库 内 `头文件 = xxx.h`：可选，缺省由生成器自动发前置声明。 */
+const CPP_SOURCE_HEADER_RE = /^头文件\s*=\s*(.+)$/u;
+/** C++源码库 命令行：与 DLL 命令同形，但 `= C++函数名` 必填、无调用约定后缀；参数表允许一层内嵌括号（处理器签名）。 */
+const CPP_SOURCE_COMMAND_RE = new RegExp(`^(空|${TYPE_EXPRESSION_SOURCE})\\s+(${TYPE_NAME_SOURCE})\\s*[（(]((?:[^（）)]|[（(][^）)]*[）)])*)[）)](?:\\s*=\\s*(${TYPE_NAME_SOURCE}))?$`, 'u');
+/** C++源码库 类块：`类 中文名 = CppClass`（C++ 类名必填，类定义来自同库声明的头文件）。 */
+const CPP_SOURCE_CLASS_RE = new RegExp(`^类\\s+(${TYPE_NAME_SOURCE})\\s*=\\s*(${TYPE_NAME_SOURCE})$`, 'u');
+/** C++源码库 结构体块（v6）：`结构体 中文名 = CppStruct`（ASCII 类型名必填，用户 C++ 代码引用它）。 */
+const CPP_SOURCE_STRUCT_RE = new RegExp(`^结构体\\s+(${TYPE_NAME_SOURCE})\\s*=\\s*(${TYPE_NAME_SOURCE})$`, 'u');
+/**
+ * C++源码库 结构体字段行（v6）：`类型 字段名 // 备注`。与 DLL 字段不同不支持定长数组——
+ * 单独匹配 `[长度]` 形态给定向中文提示，避免落入「无法识别行」泛化报错。
+ */
+const CPP_SOURCE_STRUCT_FIELD_RE = new RegExp(`^(${TYPE_EXPRESSION_SOURCE})\\s+(${TYPE_NAME_SOURCE})(?:\\s*//\\s*(.*))?$`, 'u');
+const CPP_SOURCE_STRUCT_FIELD_ARRAY_RE = new RegExp(`^(${TYPE_EXPRESSION_SOURCE})\\s+(${TYPE_NAME_SOURCE})\\s*(?:\\[\\s*\\d+\\s*\\]|［］)`, 'u');
+/** C++源码库 类块方法行：`方法 返回类型 名称(参数) [= C++方法名]`；「创建/销毁」为保留名。 */
+const CPP_SOURCE_METHOD_RE = new RegExp(`^方法\\s+(空|${TYPE_EXPRESSION_SOURCE})\\s+(${TYPE_NAME_SOURCE})\\s*[（(]((?:[^（）)]|[（(][^）)]*[）)])*)[）)](?:\\s*=\\s*(${TYPE_NAME_SOURCE}))?$`, 'u');
+/** 处理器参数片段：`处理器 名(类型 参数, ...)` / `... 回传 类型` / `... 界面线程`（v6.2 跨线程封送，可与 回传 同现但生成侧阻断封送+非空返回）。 */
+const CPP_HANDLER_PARAMETER_RE = new RegExp(`^处理器\\s+(${TYPE_NAME_SOURCE})\\s*[（(]([^）)]*)[）)](?:\\s+回传\\s+(${TYPE_EXPRESSION_SOURCE}))?(?:\\s+界面线程)?$`, 'u');
+/** C++源码库 内 `包含目录 = xxx`（v3）：整目录递归复制进 modules/<id>/sources/，供相对 #include 命中。 */
+const CPP_SOURCE_INCLUDE_DIR_RE = /^包含目录\s*=\s*(.+)$/u;
+/** C++源码库 内 `异常 = 捕获`（v3）：本库命令经 try/catch 包装，异常文本经 <库名>_取错误() 读取。 */
+const CPP_SOURCE_EXCEPTION_RE = /^异常\s*=\s*捕获$/u;
+/** C++源码库 内 `命名空间 = xxx`（v4）：本库函数命令的 C++ 函数位于该命名空间；生成头发转发函数。 */
+const CPP_SOURCE_NAMESPACE_RE = /^命名空间\s*=\s*([A-Za-z_][A-Za-z0-9_]*)$/u;
+
+/**
+ * C++源码库 命令/方法/处理器签名的参数表解析：按顶层逗号拆分（括号深度感知，
+ * 处理器参数的内联签名里可以有逗号），`处理器 名(...)` 片段解析为带内联签名的处理器参数。
+ */
+function parseCppSourceParameterList(text: string, lineNumber: number): Array<LingCppParameter & { line: number }> {
+  const pieces: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const char of text) {
+    if (char === '（' || char === '(') {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === '）' || char === ')') {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (depth === 0 && (char === ',' || char === '，')) {
+      pieces.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) pieces.push(current);
+  return pieces.map(pieceRaw => pieceRaw.trim()).filter(Boolean).map((piece, index) => {
+    let note: string | undefined;
+    const noteSeparator = piece.indexOf('//');
+    if (noteSeparator >= 0) {
+      const noteText = piece.slice(noteSeparator + 2).trim();
+      if (noteText) note = noteText;
+      piece = piece.slice(0, noteSeparator).trim();
+    }
+    const handlerMatch = piece.match(CPP_HANDLER_PARAMETER_RE);
+    if (handlerMatch) {
+      const parameter: LingCppParameter & { line: number } = {
+        name: handlerMatch[1] || `参数${index + 1}`,
+        type: '处理器',
+        byRef: false,
+        line: lineNumber
+      };
+      parameter.handlerSignatureParameters = parseCppSourceParameterList(handlerMatch[2] || '', lineNumber)
+        .map(signatureParameter => {
+          const { line: _signatureLine, ...rest } = signatureParameter;
+          return rest;
+        });
+      // `回传 类型`（v3）：回调返回类型，缺省为空（void）。
+      const handlerReturnType = (handlerMatch[3] || '').trim();
+      if (handlerReturnType) parameter.handlerReturnType = handlerReturnType;
+      // `界面线程`（v6.2）：跨线程封送——显式声明才封送，缺省维持线程透传。
+      if (/界面线程$/u.test(piece.trim())) parameter.handlerMarshalUiThread = true;
+      if (note !== undefined) parameter.note = note;
+      return parameter;
+    }
+    const pieces = piece.split(/\s+/u).filter(Boolean);
+    const byRef = pieces[pieces.length - 1] === '传址';
+    if (byRef) pieces.pop();
+    const parameterType = pieces[0] || '文本型';
+    const parameterName = pieces.length > 1 ? pieces.slice(1).join('') : `参数${index + 1}`;
+    const parameter: LingCppParameter & { line: number } = { name: parameterName, type: parameterType, byRef, line: lineNumber };
+    if (note !== undefined) parameter.note = note;
+    return parameter;
+  });
+}
 const DATA_TYPE_RE = new RegExp(`^数据类型\\s+(${TYPE_NAME_SOURCE})$`, 'u');
 const DATA_FIELD_RE = new RegExp(`^(${TYPE_NAME_SOURCE})\\s+(${TYPE_NAME_SOURCE})(?:\\s*(\\[\\]|［］))?(?:\\s*[=＝]\\s*(.+))?$`, 'u');
 const CONSTANT_RE = new RegExp(`^常量\\s+(${TYPE_NAME_SOURCE})\\s+(${TYPE_NAME_SOURCE})(?:\\s*(\\[\\]|［］))?(?:\\s*[=＝]\\s*(.*))?$`, 'u');
@@ -217,6 +364,7 @@ export function parseLingCpp(source: string): LingCppParseResult {
     dataTypes: [],
     functionLibraries: [],
     dllLibraries: [],
+    cppLibraries: [],
     classes: [],
     diagnostics,
     source
@@ -242,8 +390,11 @@ export function parseLingCpp(source: string): LingCppParseResult {
   let currentDllLibrary: LingCppDllLibrary | null = null;
   let currentDllLibraryNode: LingCppAstNode | null = null;
   let currentDllStruct: LingCppDllStruct | null = null;
-  const astNodes: LingCppAstNode[] = [];
-  const rootNode = createAstNode('program', '源文件', 1, lines[0] || '', undefined, {
+  let currentCppLibrary: LingCppCppSourceLibrary | null = null;
+  let currentCppLibraryNode: LingCppAstNode | null = null;
+  let currentCppClass: LingCppCppClass | null = null;
+  let currentCppStruct: LingCppCppSourceStruct | null = null;
+  const astNodes: LingCppAstNode[] = [];  const rootNode = createAstNode('program', '源文件', 1, lines[0] || '', undefined, {
     range: createDocumentRange(lines)
   });
   astNodes.push(rootNode);
@@ -298,29 +449,48 @@ export function parseLingCpp(source: string): LingCppParseResult {
     currentDllStruct = null;
   };
 
-  lines.forEach((line, index) => {
+  const closeCurrentCppLibrary = (endLine: number) => {
+    if (!currentCppLibrary || !currentCppLibraryNode) return;
+    const safeEndLine = Math.max(currentCppLibrary.line, Math.min(Math.max(1, lines.length), endLine));
+    currentCppLibrary.endLine = safeEndLine;
+    setNodeEndRange(currentCppLibraryNode, lines, safeEndLine);
+    currentCppLibrary = null;
+    currentCppLibraryNode = null;
+  };
+
+  lines.forEach((rawLine, index) => {
     const lineNumber = index + 1;
-    const trimmed = line.trim();
+    const rawTrimmed = rawLine.trim();
 
     // 文本块内部行与结束标记不参与任何行级语法；开始行落到兜底时收敛为单条语句。
     if (textBlockConsumedLines.has(lineNumber) && !textBlockByOpenLine.has(lineNumber)) return;
     if (textBlockStrayCloses.has(lineNumber)) {
-      diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的文本块结束标记。', `请删除该行，或在前面补写「变量 = ${LING_CPP_TEXT_BLOCK_DELIMITER}」开始行。`));
+      diagnostics.push(createDiagnostic('error', lineNumber, rawLine, '多余的文本块结束标记。', `请删除该行，或在前面补写「变量 = ${LING_CPP_TEXT_BLOCK_DELIMITER}」开始行。`));
       return;
     }
 
-    if (!trimmed) {
-      appendStatement(currentMethod, line, lineNumber);
+    if (!rawTrimmed) {
+      appendStatement(currentMethod, rawLine, lineNumber);
       return;
     }
 
-    if (isLingCppCommentLine(trimmed)) {
-      appendStatement(currentMethod, line, lineNumber);
-      pushNode(createAstNode('comment', trimmed, lineNumber, line, currentMethodNode?.id || currentClassNode?.id || currentFunctionLibraryNode?.id || currentDataTypeNode?.id || rootNode.id, {
-        value: trimmed
+    if (isLingCppCommentLine(rawTrimmed) || rawTrimmed.startsWith("'")) {
+      appendStatement(currentMethod, rawLine, lineNumber);
+      pushNode(createAstNode('comment', rawTrimmed, lineNumber, rawLine, currentMethodNode?.id || currentClassNode?.id || currentFunctionLibraryNode?.id || currentDataTypeNode?.id || rootNode.id, {
+        value: rawTrimmed
       }), currentMethodNode || currentClassNode || currentFunctionLibraryNode || currentDataTypeNode || rootNode);
       return;
     }
+
+    // 行尾 // 注释与代码分离后再进入语句/声明解析：`控件_设置文本(标签4, …) // 说明`
+    // 这类行不再因行尾注释破坏语句形态、被生成器降级成「暂不支持」注释而静默丢失。
+    // 例外：@ 内嵌 C++ 行原样透传；结构体字段行尾注释是字段备注语法（DLL/C++源码库同口径）。
+    const line = rawTrimmed.startsWith('@') || currentDllStruct || currentCppStruct
+      ? rawLine
+      : stripLingCppTrailingLineComment(rawLine);
+    const trimmed = line.trim();
+    // 被剥掉的尾巴原样保存（含前导空格），新手编辑器按语句重建显示行时回挂。
+    const trailingComment = rawLine.length > line.length ? rawLine.slice(line.length) : undefined;
 
     if (trimmed === '结束数据类型') {
       if (!currentDataType || !currentDataTypeNode) {
@@ -334,7 +504,7 @@ export function parseLingCpp(source: string): LingCppParseResult {
       return;
     }
 
-    const dllLibraryMatch = !currentClass && !currentDataType && !currentFunctionLibrary && !currentDllLibrary
+    const dllLibraryMatch = !currentClass && !currentDataType && !currentFunctionLibrary && !currentDllLibrary && !currentCppLibrary
       ? trimmed.match(DLL_LIBRARY_RE)
       : null;
     if (dllLibraryMatch) {
@@ -362,6 +532,287 @@ export function parseLingCpp(source: string): LingCppParseResult {
         diagnostics.push(createDiagnostic('error', lineNumber, line, `结构体 ${currentDllStruct.name} 缺少 结束结构体。`, '请在结构体字段后添加一行 `结束结构体`。'));
       }
       closeCurrentDllLibrary(lineNumber);
+      return;
+    }
+    const cppLibraryMatch = !currentClass && !currentDataType && !currentFunctionLibrary && !currentDllLibrary && !currentCppLibrary
+      ? trimmed.match(CPP_SOURCE_LIBRARY_RE)
+      : null;
+    if (cppLibraryMatch) {
+      if (currentMethod) closeCurrentMethod(lineNumber - 1);
+      currentCppLibrary = {
+        name: cppLibraryMatch[1],
+        line: lineNumber,
+        sourceFiles: [],
+        headerFiles: [],
+        includeDirs: [],
+        commands: [],
+        classes: [],
+        structs: []
+      };
+      currentCppLibraryNode = pushNode(createAstNode('cpp-source-library', currentCppLibrary.name, lineNumber, line, rootNode.id, {
+        detail: '项目 C++ 源码库'
+      }));
+      program.cppLibraries.push(currentCppLibrary);
+      return;
+    }
+    if (trimmed === '结束C++源码库') {
+      if (!currentCppLibrary || !currentCppLibraryNode) {
+        diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的结束C++源码库。', '请删除该行，或在前面添加 C++源码库 声明。'));
+        return;
+      }
+      if (currentCppClass) {
+        diagnostics.push(createDiagnostic('error', lineNumber, line, `类 ${currentCppClass.name} 缺少 结束类。`, '请在类方法后添加一行 `结束类`。'));
+      }
+      if (currentCppStruct) {
+        diagnostics.push(createDiagnostic('error', lineNumber, line, `结构体 ${currentCppStruct.name} 缺少 结束结构体。`, '请在结构体字段后添加一行 `结束结构体`。'));
+      }
+      closeCurrentCppLibrary(lineNumber);
+      return;
+    }
+    if (currentCppLibrary) {
+      // ===== 类块：类 中文名 = CppClass / 方法 … / 结束类 =====
+      const cppClassMatch = !currentCppClass ? trimmed.match(CPP_SOURCE_CLASS_RE) : null;
+      if (cppClassMatch) {
+        const className = cppClassMatch[1] || '';
+        const cppClassName = (cppClassMatch[2] || '').trim();
+        // 跨库重名不在这里拒收：拒收会让后续方法行全部变成「无法识别」孤儿；
+        // 类名唯一性由声明诊断（seenClassNames）给出定向中文提示。
+        currentCppClass = { name: className, cppName: cppClassName, line: lineNumber, methods: [] };
+        currentCppLibrary.classes.push(currentCppClass);
+        pushNode(createAstNode('cpp-source-class', className, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: `C++ 类：${cppClassName}`
+        }), currentCppLibraryNode);
+        return;
+      }
+      if (trimmed === '结束类') {
+        if (!currentCppClass) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的结束类。', '请删除该行，或在前面添加 类 声明。'));
+          return;
+        }
+        currentCppClass = null;
+        return;
+      }
+      if (currentCppClass) {
+        const classRemarkMatch = trimmed.match(DLL_REMARK_RE);
+        if (classRemarkMatch) {
+          const target = currentCppClass.methods[currentCppClass.methods.length - 1];
+          if (!target) {
+            diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的备注行。', '备注必须写在某个类方法的下一行。'));
+            return;
+          }
+          target.remark = (classRemarkMatch[1] || '').trim();
+          return;
+        }
+        const classPublicMatch = trimmed.match(DLL_PUBLIC_RE);
+        if (classPublicMatch) {
+          const target = currentCppClass.methods[currentCppClass.methods.length - 1];
+          if (!target) {
+            diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的「公开」标记行。', '公开标记必须写在某个类方法的下一行，例如 `公开 = 假`。'));
+            return;
+          }
+          target.isPublic = classPublicMatch[1] === '真';
+          return;
+        }
+        const methodMatch = trimmed.match(CPP_SOURCE_METHOD_RE);
+        if (methodMatch) {
+          const methodName = methodMatch[2] || '';
+          if (currentCppClass.methods.some(item => item.name === methodName)) {
+            diagnostics.push(createDiagnostic('error', lineNumber, line, `类方法 ${methodName} 重复声明。`, '方法名在本类内必须唯一。'));
+            return;
+          }
+          const cppMethodName = (methodMatch[4] || '').trim();
+          const method: LingCppCppClassMethod = {
+            name: methodName,
+            returnType: methodMatch[1] || '空',
+            parameters: parseCppSourceParameterList(methodMatch[3] || '', lineNumber).map(parameter => {
+              const { line: _parameterLine, ...rest } = parameter;
+              return rest;
+            }),
+            cppName: cppMethodName || undefined,
+            line: lineNumber
+          };
+          currentCppClass.methods.push(method);
+          pushNode(createAstNode('cpp-source-class-method', methodName, lineNumber, line, currentCppLibraryNode?.id, {
+            returnType: method.returnType,
+            detail: `方法 ${method.returnType} ${methodName}(${method.parameters.map(parameter => `${parameter.type}${parameter.byRef ? '*' : ''} ${parameter.name}`).join(', ')})${method.cppName ? ` = ${method.cppName}` : ''}`
+          }), currentCppLibraryNode);
+          return;
+        }
+        if (ACCESS_RE.test(trimmed)) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '类块不支持访问修饰符。', '生成的 类名_方法 命令默认公开，无需公开/私有区分。'));
+          return;
+        }
+        if (trimmed === '结束') {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '类块不支持「结束」标记。', '请继续写方法行，或用 `结束类` 收尾。'));
+          return;
+        }
+        diagnostics.push(createDiagnostic('error', lineNumber, line, '无法识别的类方法声明行。', '格式：`方法 返回类型 方法名(类型 参数, ...) [= C++方法名]`；「创建/销毁」为保留名（分别发射 new/delete）。'));
+        return;
+      }
+      // ===== 结构体块：结构体 中文名 = CppStruct / 字段行 / 结束结构体 =====
+      const cppStructMatch = !currentCppClass && !currentCppStruct ? trimmed.match(CPP_SOURCE_STRUCT_RE) : null;
+      if (cppStructMatch) {
+        const structName = cppStructMatch[1] || '';
+        const cppStructName = (cppStructMatch[2] || '').trim();
+        // 跨库重名不在这里拒收：拒收会让后续字段行全部变成「无法识别」孤儿；
+        // 结构体名唯一性由声明诊断（seenStructNames）给出定向中文提示。
+        currentCppStruct = { name: structName, cppName: cppStructName, line: lineNumber, fields: [] };
+        currentCppLibrary.structs.push(currentCppStruct);
+        pushNode(createAstNode('cpp-source-struct', structName, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: `C++ 结构体：${cppStructName}`
+        }), currentCppLibraryNode);
+        return;
+      }
+      if (currentCppStruct) {
+        if (trimmed === '结束结构体') {
+          if (currentCppStruct.fields.length === 0) {
+            diagnostics.push(createDiagnostic('error', lineNumber, line, `结构体 ${currentCppStruct.name} 没有任何字段。`, '请在 结构体 与 结束结构体 之间声明字段，例如 `小数型 x`。'));
+          }
+          currentCppStruct = null;
+          return;
+        }
+        const structFieldArrayMatch = trimmed.match(CPP_SOURCE_STRUCT_FIELD_ARRAY_RE);
+        if (structFieldArrayMatch) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, `结构体 ${currentCppStruct.name} 的字段不支持数组/定长写法。`, '源码库结构体与 DLL 结构体不同：同工程编译没有布局约束，文本型字段就是 std::wstring，无需定长；请写 `类型 字段名`（暂不支持数组字段）。'));
+          return;
+        }
+        const structFieldMatch = trimmed.match(CPP_SOURCE_STRUCT_FIELD_RE);
+        if (structFieldMatch) {
+          const fieldType = (structFieldMatch[1] || '').trim();
+          const fieldName = structFieldMatch[2] || '';
+          if (currentCppStruct.fields.some(item => item.name === fieldName)) {
+            diagnostics.push(createDiagnostic('error', lineNumber, line, `结构体 ${currentCppStruct.name} 的字段 ${fieldName} 重复声明。`, '字段名在结构体内必须唯一。'));
+            return;
+          }
+          const field: LingCppCppSourceStructField = { name: fieldName, type: fieldType, line: lineNumber };
+          const noteText = (structFieldMatch[3] || '').trim();
+          if (noteText) field.note = noteText;
+          currentCppStruct.fields.push(field);
+          pushNode(createAstNode('cpp-source-struct-field', fieldName, lineNumber, line, currentCppLibraryNode?.id, {
+            detail: `${fieldType} ${fieldName}`
+          }), currentCppLibraryNode);
+          return;
+        }
+        diagnostics.push(createDiagnostic('error', lineNumber, line, '无法识别的结构体字段行。', '格式：`类型 字段名 // 备注`（文本型字段即 std::wstring，无需定长），用 `结束结构体` 收尾。'));
+        return;
+      }
+      const cppSourceFileMatch = trimmed.match(CPP_SOURCE_FILE_RE);
+      if (cppSourceFileMatch) {
+        const relativePath = (cppSourceFileMatch[1] || '').trim().replace(/\\/gu, '/');
+        if (!/\.(cpp|cc|cxx|c)$/iu.test(relativePath) || relativePath.includes('..') || /^[a-zA-Z]:/u.test(relativePath) || relativePath.startsWith('/')) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '源码路径必须是项目内相对的 .cpp/.cc/.cxx/.c 文件。', `示例：源码 = cpp/${currentCppLibrary.name}.cpp`));
+          return;
+        }
+        if (!currentCppLibrary.sourceFiles.some(item => item.relativePath === relativePath)) {
+          currentCppLibrary.sourceFiles.push({ relativePath, line: lineNumber });
+        }
+        pushNode(createAstNode('cpp-source-file', relativePath, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: '参与编译的 C++ 源码文件'
+        }), currentCppLibraryNode);
+        return;
+      }
+      const cppHeaderFileMatch = trimmed.match(CPP_SOURCE_HEADER_RE);
+      if (cppHeaderFileMatch) {
+        const relativePath = (cppHeaderFileMatch[1] || '').trim().replace(/\\/gu, '/');
+        if (!/\.(h|hpp|hh|hxx)$/iu.test(relativePath) || relativePath.includes('..') || /^[a-zA-Z]:/u.test(relativePath) || relativePath.startsWith('/')) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '头文件路径必须是项目内相对的 .h/.hpp/.hh/.hxx 文件。', `示例：头文件 = cpp/${currentCppLibrary.name}.h`));
+          return;
+        }
+        if (!currentCppLibrary.headerFiles.some(item => item.relativePath === relativePath)) {
+          currentCppLibrary.headerFiles.push({ relativePath, line: lineNumber });
+        }
+        pushNode(createAstNode('cpp-source-file', relativePath, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: '生成 C++ 时 #include 的用户头文件'
+        }), currentCppLibraryNode);
+        return;
+      }
+      const cppIncludeDirMatch = trimmed.match(CPP_SOURCE_INCLUDE_DIR_RE);
+      if (cppIncludeDirMatch) {
+        const relativePath = (cppIncludeDirMatch[1] || '').trim().replace(/\\/gu, '/').replace(/\/+$/u, '');
+        if (!relativePath || relativePath.includes('..') || /^[a-zA-Z]:/u.test(relativePath) || relativePath.startsWith('/')) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '包含目录必须是项目内相对目录。', '示例：包含目录 = cpp/third_party'));
+          return;
+        }
+        if (!currentCppLibrary.includeDirs.some(item => item.relativePath === relativePath)) {
+          currentCppLibrary.includeDirs.push({ relativePath, line: lineNumber });
+        }
+        pushNode(createAstNode('cpp-source-file', relativePath, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: '递归复制进源码目录的包含目录'
+        }), currentCppLibraryNode);
+        return;
+      }
+      if (CPP_SOURCE_EXCEPTION_RE.test(trimmed)) {
+        currentCppLibrary.exceptionCapture = true;
+        pushNode(createAstNode('cpp-source-file', trimmed, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: '异常捕获模式：命令经 try/catch 包装'
+        }), currentCppLibraryNode);
+        return;
+      }
+      const cppNamespaceMatch = trimmed.match(CPP_SOURCE_NAMESPACE_RE);
+      if (cppNamespaceMatch) {
+        if (currentCppLibrary.namespaceName && currentCppLibrary.namespaceName !== cppNamespaceMatch[1]) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, `库 ${currentCppLibrary.name} 重复声明命名空间。`, '一个库只支持一行 `命名空间 = xxx`；需要多个命名空间请拆成多个库。'));
+          return;
+        }
+        currentCppLibrary.namespaceName = cppNamespaceMatch[1];
+        pushNode(createAstNode('cpp-source-file', trimmed, lineNumber, line, currentCppLibraryNode?.id, {
+          detail: `C++ 命名空间：${cppNamespaceMatch[1]}`
+        }), currentCppLibraryNode);
+        return;
+      }
+      const cppRemarkMatch = trimmed.match(DLL_REMARK_RE);
+      if (cppRemarkMatch) {
+        const target = currentCppLibrary.commands[currentCppLibrary.commands.length - 1];
+        if (!target) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的备注行。', '备注必须写在某条声明命令的下一行。'));
+          return;
+        }
+        target.remark = (cppRemarkMatch[1] || '').trim();
+        return;
+      }
+      const cppPublicMatch = trimmed.match(DLL_PUBLIC_RE);
+      if (cppPublicMatch) {
+        const target = currentCppLibrary.commands[currentCppLibrary.commands.length - 1];
+        if (!target) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, '多余的「公开」标记行。', '公开标记必须写在某条声明命令的下一行，例如 `公开 = 假`。'));
+          return;
+        }
+        target.isPublic = cppPublicMatch[1] === '真';
+        return;
+      }
+      const cppCommandMatch = trimmed.match(CPP_SOURCE_COMMAND_RE);
+      if (cppCommandMatch) {
+        const commandName = cppCommandMatch[2] || '';
+        if (currentCppLibrary.commands.some(item => item.name === commandName)) {
+          diagnostics.push(createDiagnostic('error', lineNumber, line, `C++ 源码命令 ${commandName} 重复声明。`, '命令名在本库内必须唯一。'));
+          return;
+        }
+        const parameters = parseCppSourceParameterList(cppCommandMatch[3] || '', lineNumber);
+        const command: LingCppCppSourceCommand = {
+          name: commandName,
+          returnType: cppCommandMatch[1] || '空',
+          parameters,
+          // `= C++函数名` 是本语法的要求；缺省先入模（空名），由声明诊断给出定向修复提示，
+          // 结构化编辑器里「添加命令」后的空行也走同一诊断，不在这里打断输入。
+          cppName: (cppCommandMatch[4] || '').trim(),
+          line: lineNumber
+        };
+        currentCppLibrary.commands.push(command);
+        pushNode(createAstNode('cpp-source-command', commandName, lineNumber, line, currentCppLibraryNode?.id, {
+          returnType: command.returnType,
+          detail: `${command.returnType} ${commandName}(${parameters.map(parameter => `${parameter.type}${parameter.byRef ? '*' : ''} ${parameter.name}`).join(', ')})${command.cppName ? ` = ${command.cppName}` : ''}`
+        }), currentCppLibraryNode);
+        return;
+      }
+      if (ACCESS_RE.test(trimmed)) {
+        diagnostics.push(createDiagnostic('error', lineNumber, line, 'C++ 源码库不支持访问修饰符。', '声明命令默认对补全可见，无需公开/私有区分。'));
+        return;
+      }
+      if (trimmed === '结束') {
+        diagnostics.push(createDiagnostic('error', lineNumber, line, 'C++ 源码库不支持「结束」标记。', '请继续写声明行，或用 `结束C++源码库` 收尾。'));
+        return;
+      }
+      diagnostics.push(createDiagnostic('error', lineNumber, line, '无法识别的 C++ 源码库声明行。', '格式：`返回类型 命令名(类型 参数, ...) = C++函数名`、`源码 = cpp/xxx.cpp`、`头文件 = cpp/xxx.h` 或 `备注: 文本`。'));
       return;
     }
     if (currentDllLibrary) {
@@ -867,7 +1318,7 @@ export function parseLingCpp(source: string): LingCppParseResult {
       diagnostics.push(createDiagnostic('error', lineNumber, line, `多行文本块标记 ${LING_CPP_TEXT_BLOCK_DELIMITER} 只能写在「变量 = ${LING_CPP_TEXT_BLOCK_DELIMITER}」行尾，或作为单独一行的结束标记。`, '一期仅支持赋值右部文本块；命令实参、返回值和类型声明初值请先赋值给变量再引用。'));
     }
 
-    const statement = appendStatement(currentMethod, line, lineNumber);
+    const statement = appendStatement(currentMethod, line, lineNumber, trailingComment);
     pushNode(createAstNode('statement', trimmed, lineNumber, line, currentMethodNode?.id || currentClassNode?.id || currentFunctionLibraryNode?.id, {
       value: statement?.text || trimmed,
       detail: currentMethod ? '方法语句' : '未识别类成员'
@@ -929,6 +1380,17 @@ export function parseLingCpp(source: string): LingCppParseResult {
     currentDllLibrary.endLine = lines.length;
     setNodeEndRange(currentDllLibraryNode, lines, lines.length);
     diagnostics.push(createDiagnostic('error', currentDllLibrary.line, lines[currentDllLibrary.line - 1] || `DLL命令库 ${currentDllLibrary.name}`, 'DLL命令库 声明缺少结束语句。', '请在末尾添加 `结束DLL命令库`。'));
+  }
+  if (currentCppLibrary && currentCppLibraryNode) {
+    currentCppLibrary.endLine = lines.length;
+    setNodeEndRange(currentCppLibraryNode, lines, lines.length);
+    diagnostics.push(createDiagnostic('error', currentCppLibrary.line, lines[currentCppLibrary.line - 1] || `C++源码库 ${currentCppLibrary.name}`, 'C++源码库 声明缺少结束语句。', '请在末尾添加 `结束C++源码库`。'));
+    if (currentCppClass) {
+      diagnostics.push(createDiagnostic('error', currentCppClass.line, lines[currentCppClass.line - 1] || `类 ${currentCppClass.name}`, `类 ${currentCppClass.name} 缺少结束语句。`, '请在类方法末尾添加 `结束类`。'));
+    }
+    if (currentCppStruct) {
+      diagnostics.push(createDiagnostic('error', currentCppStruct.line, lines[currentCppStruct.line - 1] || `结构体 ${currentCppStruct.name}`, `结构体 ${currentCppStruct.name} 缺少结束语句。`, '请在结构体字段末尾添加 `结束结构体`。'));
+    }
   }
   if (currentClass && currentClassNode) {
     currentClass.endLine = lines.length;
@@ -1216,11 +1678,17 @@ export function buildLingCppSymbolIndex(nodes: LingCppAstNode[]): LingCppSymbolI
   return index;
 }
 
-function appendStatement(method: LingCppMethod | null, line: string, lineNumber: number): LingCppStatement | undefined {
+function appendStatement(
+  method: LingCppMethod | null,
+  line: string,
+  lineNumber: number,
+  trailingComment?: string
+): LingCppStatement | undefined {
   if (!method) return undefined;
   const indent = line.match(/^\s*/)?.[0] || '';
   const text = line.slice(indent.length);
   const statement: LingCppStatement = { line: lineNumber, indent, text };
+  if (trailingComment) statement.trailingComment = trailingComment;
   method.statements.push(statement);
   return statement;
 }
