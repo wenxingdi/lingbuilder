@@ -605,12 +605,23 @@ test('全部内置方法的控件参数统一使用 controlRef、裸补全和明
       // 另一图像句柄 参数与 CEF3图像_创建 返回值由裸 longLong 改为名义类型
       //（对齐传输族约定；类型门禁此前按裸 longLong 拦截名义句柄实参，ep28 教程实录暴露），
       // 无新增 controlRef（实算摘要 2faf202c/8217b147）。
+      // 基线 2026-10-29 写回（FBro 弹窗顶层窗口控制批次）：lingbuilder.fbro.browser 2.13.0
+      // 新增 FBro_实例取窗口句柄 / FBro_实例取窗口边界JSON / FBro_实例设置窗口边界
+      // 三命令（+3 命令 +7 参数，实例句柄/数值参数，无新增 controlRef；
+      // 同批 FBro_后台创建 描述补「要可见窗口请接着 FBro_实例打开原生UI」交叉引用）
+      //（实算摘要 9ea9a7d7/d9f1dadf）。
+      // 基线 2026-10-29 二写回（CEF3 弹窗窗口边界批次）：lingbuilder.cef3.browser
+      // 3.0.0-alpha.6 新增 CEF3_置实例窗口边界 / CEF3_取实例窗口边界JSON /
+      // CEF3_取实例窗口句柄 三命令（+3 命令 +11 参数：创建弹窗浏览器尾部 +4 可选
+      // 左/顶/宽/高 与 置实例窗口边界 5 参，int 无 controlRef；创建时定界走
+      // LB_CEF3_BrowserSetWindowBounds，屏幕物理像素、-1＝该组不变）
+      //（实算摘要 e0fa5f9a/dd9f0664）。
       modules: 108,
-      commands: 4623,
-      parameters: 8599,
+      commands: 4629,
+      parameters: 8617,
       controlReferences: 1499,
-      commandDigest: '2faf202c',
-      parameterDigest: '8217b147'
+      commandDigest: 'e0fa5f9a',
+      parameterDigest: 'dd9f0664'
     },
     '内置模块的每个方法和每个参数必须进入稳定 controlRef 审计目录'
   );
@@ -1170,11 +1181,19 @@ test('工作区已安装模块全部通过 controlRef 清单和示例门禁', as
       // 基线 2026-10-27 写回（CEF3 图像族名义类型批次）：内置部分见上一用例
       //（图像族 15 命令签名改名义类型，无 controlRef 变化）；磁盘侧 +4 命令 +6 参数
       // 来自并行会话在途清单，按本机实算写回（实算摘要 879ccbe5/495cec28）。
-      commands: 8761,
-      parameters: 20971,
-      commandDigest: '879ccbe5',
+      // 基线 2026-10-29 写回（FBro 弹窗顶层窗口控制批次）：内置 +3 命令 +7 参数
+      //（fbro.browser 2.13.0 弹窗边界三命令，见内置夹具注释）；磁盘侧无独立变化
+      //（实算摘要 aff6d81c/83add250）。同批补上期望对象一直缺失的 modules 键
+      //（actual 侧带 modules: audit.moduleCount，缺键 deepEqual 恒败的存量基线红就此转绿）。
+      // 基线 2026-10-29 二写回（CEF3 弹窗窗口边界批次）：内置 +3 命令 +11 参数
+      //（cef3.browser 3.0.0-alpha.6 弹窗定位三命令 + 创建弹窗浏览器尾部 4 可选参，
+      // 见内置夹具注释）；磁盘侧无独立变化（实算摘要 549b9c4d/94d3b725）。
+      modules: 122,
+      commands: 8767,
+      parameters: 20989,
+      commandDigest: '549b9c4d',
       controlReferences: 5281,
-      parameterDigest: '495cec28'
+      parameterDigest: '94d3b725'
   }, '内置、官方和当前工作区第三方模块的每个方法与参数都必须进入全量审计');
   // OpenCV 以内置清单为准：本机未装 SDK 时磁盘上的同名清单是只有骨架的占位包（0 命令、无 targets）。
   const manifest = BUILTIN_MODULES.find(module => module.id === OPENCV_MODULE_ID) || auditedManifests.get('lingbuilder.opencv.sdk');
@@ -2949,7 +2968,8 @@ test('FBro browser 2.5 keeps 2.1 submodules compatible with the v3 event core', 
   // 基线 2026-09-29 写回：fbro.browser 2.10.0（区域实例精细化）→ 2.11.0（实例级代理）；
   // 子模块除 vip 2.2.0（新窗口转标签页）→ 2.3.0（实例级指纹应用）、
   // network 2.1.0→2.2.0（纯协议响应读取族）外仍为 2.1.0。
-  assert.equal(callable.find(module => module.id === 'lingbuilder.fbro.browser')?.version, '2.12.0');
+  // 基线 2026-10-29 写回：fbro.browser 2.13.0（弹窗顶层窗口控制三命令）。
+  assert.equal(callable.find(module => module.id === 'lingbuilder.fbro.browser')?.version, '2.13.0');
   assert.ok(callable.filter(module => module.id !== 'lingbuilder.fbro.browser' && module.id !== 'lingbuilder.fbro.vip' && module.id !== 'lingbuilder.fbro.network').every(module => module.version === '2.1.0'));
   assert.equal(callable.find(module => module.id === 'lingbuilder.fbro.vip')?.version, '2.3.0');
   assert.equal(callable.find(module => module.id === 'lingbuilder.fbro.network')?.version, '2.2.0');
@@ -2970,7 +2990,8 @@ test('FBro module family exposes one manager entry and atomically enables the st
   // 基线 2026-09-29 写回：区域族+原生UI（692→705）与实例级代理/实例级指纹应用（705→707）。
   // 基线 2026-09-29 再写回：纯协议响应读取族（707→712，fbro.network +5，取响应对象/取消也归 network）。
   // 2026-09-29 六写回：FBro_实例取Cookie（fbro.browser 2.12.0，后台实例收割登录态 Cookie）。
-  assert.equal(countModuleCommands(family), 713);
+  // 2026-10-29 写回：弹窗顶层窗口控制三命令（fbro.browser 2.13.0，713→716）。
+  assert.equal(countModuleCommands(family), 716);
   assert.equal(isModuleHiddenByFamily('lingbuilder.fbro.browser'), false);
   assert.equal(isModuleHiddenByFamily('lingbuilder.fbro.objects'), true);
   assert.equal(isModuleHiddenByFamily('lingbuilder.fbro.sdk'), true);
@@ -4718,7 +4739,9 @@ test('CEF3 user documentation covers the unified event catalog and every public 
   // 2026-09-29 再写回：lingbuilder.cef3.network 纯协议 URL 请求族 24 条（CefURLRequest 直连：
   // 创建请求客户端/请求、设置地址/方法/头/正文、发起、状态/错误/响应对象、响应头映射JSON、
   // 事件领取、下载块取回/转文本、认证事件与回复、取消/缓存/释放），478 → 502。
-  assert.equal(publicCommands.length, 502);
+  // 2026-10-29 再写回：lingbuilder.cef3.browser 弹窗窗口边界三命令（置实例窗口边界/
+  // 取实例窗口边界JSON/取实例窗口句柄），502 → 505。
+  assert.equal(publicCommands.length, 505);
   const threadEntries = CEF3_SAFE_API_CATALOG.filter(entry => entry.functionId.includes('.cef_thread_capi.'));
   assert.equal(threadEntries.length, 5);
   assert.ok(threadEntries.every(entry => entry.implementationStatus === 'implemented'));
@@ -4881,7 +4904,9 @@ test('FBro user documentation covers public events, classified slots and public 
   // FBro_实例设置代理、FBroVIP_实例应用指纹JSON，均随 fbro README 命令表同步）。
   // 基线 2026-09-29 再写回：698 → 703（纯协议响应读取族 fbro.network +5）。
   // 基线 2026-09-29 三写回：703 → 704（FBro_实例取Cookie，后台实例收割登录态 Cookie）。
-  assert.equal(publicCommands.length, 704);
+  // 基线 2026-10-29 写回：704 → 707（fbro.browser 2.13.0 弹窗顶层窗口控制三命令：
+  // FBro_实例取窗口句柄/取窗口边界JSON/设置窗口边界，随 fbro README 命令表同步）。
+  assert.equal(publicCommands.length, 707);
   assert.equal(internalCommands.length, 9);
   assert.ok(document.includes('FBro_绑定事件(FBro浏览器1, "新窗口打开前", &处理新窗口)'));
   assert.ok(document.includes(
@@ -5025,12 +5050,21 @@ test('CEF3 与 FBro 多店铺能力：弹窗/枚举/关闭全部/实例代理进
   assert.ok(cef3 && shell);
   const cef3Names = new Set(cef3!.contributes?.commands?.map(command => command.name));
   const cef3Bindings = new Map(cef3!.bindings?.commands?.map(binding => [binding.command, binding]));
-  for (const name of ['CEF3_创建弹窗浏览器', 'CEF3_创建区域', 'CEF3_枚举实例JSON', 'CEF3_关闭全部实例', 'CEF3会话_取上下文实例', 'CEF3_设置用户代理', 'CEF3_设置实例用户代理', 'CEF3_取用户代理', 'CEF3_取实例用户代理']) {
+  for (const name of ['CEF3_创建弹窗浏览器', 'CEF3_创建区域', 'CEF3_枚举实例JSON', 'CEF3_关闭全部实例', 'CEF3会话_取上下文实例', 'CEF3_设置用户代理', 'CEF3_设置实例用户代理', 'CEF3_取用户代理', 'CEF3_取实例用户代理', 'CEF3_置实例窗口边界', 'CEF3_取实例窗口边界JSON', 'CEF3_取实例窗口句柄']) {
     assert.ok(cef3Names.has(name), `CEF3 缺少 contribution：${name}`);
     assert.ok(cef3Bindings.has(name), `CEF3 缺少 binding：${name}`);
   }
   // 弹窗首参为整数实例编号（非 controlRef）。
   assert.equal(cef3Bindings.get('CEF3_创建弹窗浏览器')?.parameters?.[0]?.type, 'int');
+  // 弹窗窗口边界批次：创建弹窗浏览器尾部 4 个可选 int（左/顶/宽/高，-1＝系统默认），
+  // 三条定位命令首参 int 实例编号，边界命令返回 int/JSON 文本/原生句柄 longLong。
+  assert.deepEqual(cef3Bindings.get('CEF3_创建弹窗浏览器')?.parameters?.map(p => p.type),
+    ['int', 'wideString', 'wideString', 'wideString', 'int', 'int', 'int', 'int']);
+  assert.deepEqual(cef3Bindings.get('CEF3_置实例窗口边界')?.parameters?.map(p => p.type),
+    ['int', 'int', 'int', 'int', 'int']);
+  assert.equal(cef3Bindings.get('CEF3_置实例窗口边界')?.returnType, 'int');
+  assert.equal(cef3Bindings.get('CEF3_取实例窗口边界JSON')?.returnType, 'wideString');
+  assert.equal(cef3Bindings.get('CEF3_取实例窗口句柄')?.returnType, 'longLong');
   // 实例版会话句柄：首参为整数实例编号、返回长整数型（RequestContext 受管句柄）。
   assert.equal(cef3Bindings.get('CEF3会话_取上下文实例')?.parameters?.[0]?.type, 'int');
   assert.equal(cef3Bindings.get('CEF3会话_取上下文实例')?.returnType, 'longLong');
@@ -5055,6 +5089,10 @@ test('CEF3 与 FBro 多店铺能力：弹窗/枚举/关闭全部/实例代理进
       '类 MainWindow',
       '  事件 _MainWindow_创建完毕()',
       '    CEF3_创建弹窗浏览器(1, "https://example.com", ".cef3/store-a", "http://127.0.0.1:7890")',
+      '    CEF3_创建弹窗浏览器(2, "https://example.com", ".cef3/store-b", "", 60, 50, 800, 600)',
+      '    CEF3_置实例窗口边界(1, 60, 50, -1, -1)',
+      '    调试输出(CEF3_取实例窗口边界JSON(1))',
+      '    CEF3_取实例窗口句柄(1)',
       '    CEF3会话_取上下文实例(1)',
       '    CEF3_枚举实例JSON()',
       '    CEF3_关闭全部实例()',
@@ -5065,6 +5103,16 @@ test('CEF3 与 FBro 多店铺能力：弹窗/枚举/关闭全部/实例代理进
   const mainCpp = generated.files.reduce((acc, file) => file.relativePath === 'lingbuilder_runtime.h' || file.relativePath === 'main.cpp' ? acc + file.content + '\n' : acc, '');
   assert.ok(mainCpp.includes('int CEF3_创建弹窗浏览器(int instanceId'), '缺少 CEF3_创建弹窗浏览器 运行时定义');
   assert.ok(mainCpp.includes('LB_CEF3_BrowserCreateChrome'), 'CEF3 弹窗未走 Chrome Runtime');
+  assert.ok(mainCpp.includes('CEF3_创建弹窗浏览器(1, L"https://example.com", L".cef3/store-a", L"http://127.0.0.1:7890");'), 'CEF3 弹窗宽字符调用点不符');
+  // 尾部可选参数：8 参调用按位置透传，4 参旧调用由 C++ 默认值兜底完全兼容。
+  assert.ok(mainCpp.includes('CEF3_创建弹窗浏览器(2, L"https://example.com", L".cef3/store-b", L"", 60, 50, 800, 600);'), 'CEF3 弹窗带边界调用点缺失');
+  assert.ok(mainCpp.includes('LB_CEF3_BrowserSetWindowBounds(handle, left, top, width, height)'), '创建时初始定界未接桥导出');
+  assert.ok(mainCpp.includes('int CEF3_置实例窗口边界(int instanceId'), '缺少 CEF3_置实例窗口边界 运行时定义');
+  assert.ok(mainCpp.includes('CEF3_置实例窗口边界(1, 60, 50, -1, -1);'), 'CEF3 置实例窗口边界调用点缺失');
+  assert.ok(mainCpp.includes('std::wstring CEF3_取实例窗口边界JSON(int instanceId'), '缺少 CEF3_取实例窗口边界JSON 运行时定义');
+  assert.ok(mainCpp.includes('LB_CEF3_BrowserGetWindowBounds'), '取边界JSON未接桥导出');
+  assert.ok(mainCpp.includes('long long CEF3_取实例窗口句柄(int instanceId'), '缺少 CEF3_取实例窗口句柄 运行时定义');
+  assert.ok(mainCpp.includes('LB_CEF3_BrowserGetNativeWindowHandle'), '取实例窗口句柄未接桥导出');
   assert.ok(mainCpp.includes('std::wstring CEF3_枚举实例JSON'), '缺少 CEF3_枚举实例JSON 运行时定义');
   assert.ok(mainCpp.includes('int CEF3_关闭全部实例'), '缺少 CEF3_关闭全部实例 运行时定义');
   assert.ok(mainCpp.includes('long long CEF3会话_取上下文实例(int instanceId'), '缺少 CEF3会话_取上下文实例 运行时定义');
@@ -5074,7 +5122,6 @@ test('CEF3 与 FBro 多店铺能力：弹窗/枚举/关闭全部/实例代理进
   assert.ok(mainCpp.includes('LB_CEF3_RequestSetHeaderByName'), 'CEF3 事件回调缺少逐实例 User-Agent 请求头改写');
   assert.ok(mainCpp.includes('activeInstance->userAgent.c_str(), 1)'), 'CEF3 事件回调未按实例改写 UA 头');
   assert.ok(mainCpp.includes('L"User-Agent"'), 'CEF3 UA 改写目标头名缺失');
-  assert.ok(mainCpp.includes('CEF3_创建弹窗浏览器(1, L"https://example.com", L".cef3/store-a", L"http://127.0.0.1:7890");'), 'CEF3 弹窗宽字符调用点不符');
 });
 
 test('EdgeView 导出路径、响应正文时效、回调内同步等待与控件级等待事件保持统一契约', () => {

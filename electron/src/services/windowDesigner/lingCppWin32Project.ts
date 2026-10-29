@@ -6216,6 +6216,90 @@ static std::wstring FBro_实例取Cookie(long long instanceId, const wchar_t* ur
 #endif
     return L"";
 }
+// 弹窗顶层窗口查询与边界控制：后台实例没有窗口返回 0/{}；弹窗（FBro_实例打开原生UI）
+// 的原生窗口由 Chrome Runtime 异步建出，设置边界前先轮询等窗口就绪（上限约 2 秒）。
+// 坐标语义与 EdgeView_置实例大小 / FBro_创建区域 一致：逻辑坐标（DIP），按弹窗所在显示器 DPI 缩放。
+static long long FBro_实例取窗口句柄(long long instanceId) {
+#if LINGBUILDER_NE_FBRO_AVAILABLE
+    const LB_FBRO_HANDLE handle = static_cast<LB_FBRO_HANDLE>(instanceId);
+    long long window = 0;
+    if (handle && LB_FBro_GetWindowHandle(handle, &window) > 0) return window;
+#else
+    (void)instanceId;
+#endif
+    return 0;
+}
+static std::wstring FBro_实例取窗口边界JSON(long long instanceId) {
+#if LINGBUILDER_NE_FBRO_AVAILABLE
+    const LB_FBRO_HANDLE handle = static_cast<LB_FBRO_HANDLE>(instanceId);
+    long long window = 0;
+    if (handle && LB_FBro_GetWindowHandle(handle, &window) > 0 && window && IsWindow(reinterpret_cast<HWND>(window))) {
+        RECT bounds = {};
+        if (GetWindowRect(reinterpret_cast<HWND>(window), &bounds)) {
+            const UINT dpi = GetDpiForWindow(reinterpret_cast<HWND>(window));
+            const UINT effectiveDpi = dpi ? dpi : 96;
+            std::wstring json = L"{\\"x\\":";
+            json += std::to_wstring(MulDiv(bounds.left, 96, static_cast<int>(effectiveDpi)));
+            json += L",\\"y\\":";
+            json += std::to_wstring(MulDiv(bounds.top, 96, static_cast<int>(effectiveDpi)));
+            json += L",\\"width\\":";
+            json += std::to_wstring(MulDiv(bounds.right - bounds.left, 96, static_cast<int>(effectiveDpi)));
+            json += L",\\"height\\":";
+            json += std::to_wstring(MulDiv(bounds.bottom - bounds.top, 96, static_cast<int>(effectiveDpi)));
+            json += L"}";
+            return json;
+        }
+    }
+#else
+    (void)instanceId;
+#endif
+    return L"{}";
+}
+static int FBro_实例设置窗口边界(long long instanceId, int x, int y, int width, int height) {
+#if LINGBUILDER_NE_FBRO_AVAILABLE
+    const LB_FBRO_HANDLE handle = static_cast<LB_FBRO_HANDLE>(instanceId);
+    if (!handle || width <= 0 || height <= 0) {
+        调试输出(L"FBro 实例设置窗口边界失败：实例句柄无效或宽高必须大于 0。");
+        return 0;
+    }
+    // 后台实例与弹窗的浏览器都是异步启动（登记后 IsInstanceAlive 一度为假），
+    // 顶层窗口还要再晚一步：只认窗口句柄轮询（上限约 5 秒），不按存活提前退。
+    HWND popupWindow = nullptr;
+    for (int elapsed = 0; elapsed <= 5000; elapsed += 25) {
+        long long window = 0;
+        if (LB_FBro_GetWindowHandle(handle, &window) > 0 && window && IsWindow(reinterpret_cast<HWND>(window))) {
+            popupWindow = reinterpret_cast<HWND>(window);
+            break;
+        }
+        Sleep(25);
+    }
+    if (!popupWindow) {
+        调试输出(L"FBro 实例设置窗口边界失败：实例浏览器尚未启动完成或窗口未就绪（弹窗需先经 FBro_实例打开原生UI 弹出）。");
+        return 0;
+    }
+    const UINT dpi = GetDpiForWindow(popupWindow);
+    const UINT effectiveDpi = dpi ? dpi : 96;
+    const int scaledX = MulDiv(x, static_cast<int>(effectiveDpi), 96);
+    const int scaledY = MulDiv(y, static_cast<int>(effectiveDpi), 96);
+    const int scaledWidth = MulDiv(width, static_cast<int>(effectiveDpi), 96);
+    const int scaledHeight = MulDiv(height, static_cast<int>(effectiveDpi), 96);
+    if (!SetWindowPos(popupWindow, nullptr, scaledX, scaledY, scaledWidth, scaledHeight, SWP_NOZORDER | SWP_NOACTIVATE)) return 0;
+    // 内核完成初始化时可能用默认布局覆盖一次：短暂复核，边界被改回就补设一次。
+    Sleep(150);
+    RECT actual = {};
+    if (IsWindow(popupWindow) && GetWindowRect(popupWindow, &actual)
+        && (actual.left != scaledX || actual.top != scaledY
+            || actual.right - actual.left != scaledWidth
+            || actual.bottom - actual.top != scaledHeight)) {
+        SetWindowPos(popupWindow, nullptr, scaledX, scaledY, scaledWidth, scaledHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    return 1;
+#else
+    (void)instanceId; (void)x; (void)y; (void)width; (void)height;
+    调试输出(L"FBro 不可用：无法设置实例窗口边界。");
+    return 0;
+#endif
+}
 static int FBroVIP_实例应用指纹JSON(long long instanceId, const wchar_t* json) {
 #if LINGBUILDER_NE_FBRO_AVAILABLE
     return instanceId > 0 && json ? LB_FBro_ApplyFingerprintJson(static_cast<LB_FBRO_HANDLE>(instanceId), json) : -1;
@@ -13990,6 +14074,9 @@ ${webSocketServerWindowField}
         std::wstring userAgent;
         std::wstring proxyServer;
         std::wstring fingerprintJson;
+        // 指纹延迟重试：创建批次内浏览器/VIP 控件常未就绪，首次应用会静默失败（-1/-4）；
+        // 由 WM_TIMER 延迟重试直到成功（fingerprintApplied）或次数耗尽。
+        bool fingerprintApplied = false;
         std::wstring lastEvent;
         std::wstring lastEventData;
         std::wstring lastEventJson;
@@ -15810,7 +15897,30 @@ ${embeddedSiteRuntimeSection}
             LB_FBro_SetEventCallbackV2(instance->handle, FBro_桥接事件V2, this);
             LB_FBro_SetEventCallbackV3(instance->handle, FBro_桥接事件V3, this);
             if (!instance->proxyServer.empty()) LB_FBro_SetProxy(instance->handle, instance->proxyServer.c_str(), L"", L"");
-            if (!instance->fingerprintJson.empty()) LB_FBro_ApplyFingerprintJson(instance->handle, instance->fingerprintJson.c_str());
+            if (!instance->fingerprintJson.empty()) {
+                if (LB_FBro_ApplyFingerprintJson(instance->handle, instance->fingerprintJson.c_str()) > 0) {
+                    instance->fingerprintApplied = true;
+                } else {
+                    // 浏览器句柄刚建立时 CEF/VIP 控件尚未就绪，首次应用常见 -1/-4；
+                    // 延迟就绪窗口后重试，成功或次数耗尽为止（失败不再静默丢失）。
+                    struct FbroFingerprintRetry { FbroBrowserInstance* instance; int attemptsLeft = 5; };
+                    auto retryState = std::make_shared<FbroFingerprintRetry>();
+                    retryState->instance = instance;
+                    auto retryStep = std::make_shared<std::function<void()>>();
+                    *retryStep = [this, retryState, retryStep]() {
+                        auto* pending = retryState->instance;
+                        if (!pending || pending->fingerprintApplied || !pending->handle || retryState->attemptsLeft <= 0) return;
+                        if (LB_FBro_ApplyFingerprintJson(pending->handle, pending->fingerprintJson.c_str()) > 0) {
+                            pending->fingerprintApplied = true;
+                            return;
+                        }
+                        --retryState->attemptsLeft;
+                        const auto step = retryStep;
+                        延迟调用(1500, [step]() { (*step)(); });
+                    };
+                    延迟调用(1500, [retryStep]() { (*retryStep)(); });
+                }
+            }
 #ifdef LINGBUILDER_FBRO_EMBEDDED_SITE
             if (instance->handle) {
                 // OnWindowCreated 处于消息循环上下文，注册等待安全；成功后导航入口地址。
@@ -16759,6 +16869,90 @@ ${embeddedSiteFbroSection}
         (void)instanceId; (void)url;
 #endif
         return L"";
+    }
+    // 弹窗顶层窗口查询与边界控制：后台实例没有窗口返回 0/{}；弹窗（FBro_实例打开原生UI）
+    // 的原生窗口由 Chrome Runtime 异步建出，设置边界前先轮询等窗口就绪（上限约 2 秒）。
+    // 坐标语义与 EdgeView_置实例大小 / FBro_创建区域 一致：逻辑坐标（DIP），按弹窗所在显示器 DPI 缩放。
+    long long FBro_实例取窗口句柄(long long instanceId) {
+#if LINGBUILDER_FBRO_AVAILABLE
+        const LB_FBRO_HANDLE handle = static_cast<LB_FBRO_HANDLE>(instanceId);
+        long long window = 0;
+        if (handle && LB_FBro_GetWindowHandle(handle, &window) > 0) return window;
+#else
+        (void)instanceId;
+#endif
+        return 0;
+    }
+    std::wstring FBro_实例取窗口边界JSON(long long instanceId) {
+#if LINGBUILDER_FBRO_AVAILABLE
+        const LB_FBRO_HANDLE handle = static_cast<LB_FBRO_HANDLE>(instanceId);
+        long long window = 0;
+        if (handle && LB_FBro_GetWindowHandle(handle, &window) > 0 && window && IsWindow(reinterpret_cast<HWND>(window))) {
+            RECT bounds = {};
+            if (GetWindowRect(reinterpret_cast<HWND>(window), &bounds)) {
+                const UINT dpi = GetDpiForWindow(reinterpret_cast<HWND>(window));
+                const UINT effectiveDpi = dpi ? dpi : 96;
+                std::wstring json = L"{\\"x\\":";
+                json += std::to_wstring(MulDiv(static_cast<int>(bounds.left), 96, static_cast<int>(effectiveDpi)));
+                json += L",\\"y\\":";
+                json += std::to_wstring(MulDiv(static_cast<int>(bounds.top), 96, static_cast<int>(effectiveDpi)));
+                json += L",\\"width\\":";
+                json += std::to_wstring(MulDiv(static_cast<int>(bounds.right - bounds.left), 96, static_cast<int>(effectiveDpi)));
+                json += L",\\"height\\":";
+                json += std::to_wstring(MulDiv(static_cast<int>(bounds.bottom - bounds.top), 96, static_cast<int>(effectiveDpi)));
+                json += L"}";
+                return json;
+            }
+        }
+#else
+        (void)instanceId;
+#endif
+        return L"{}";
+    }
+    int FBro_实例设置窗口边界(long long instanceId, int x, int y, int width, int height) {
+#if LINGBUILDER_FBRO_AVAILABLE
+        const LB_FBRO_HANDLE handle = static_cast<LB_FBRO_HANDLE>(instanceId);
+        if (!handle || width <= 0 || height <= 0) {
+            调试输出(L"FBro 实例设置窗口边界失败：实例句柄无效或宽高必须大于 0。");
+            return 0;
+        }
+        // 后台实例与弹窗的浏览器都是异步启动（登记后 IsInstanceAlive 一度为假），
+        // 顶层窗口还要再晚一步：只认窗口句柄轮询（上限约 5 秒），不按存活提前退。
+        HWND popupWindow = nullptr;
+        for (int elapsed = 0; elapsed <= 5000; elapsed += 25) {
+            long long window = 0;
+            if (LB_FBro_GetWindowHandle(handle, &window) > 0 && window && IsWindow(reinterpret_cast<HWND>(window))) {
+                popupWindow = reinterpret_cast<HWND>(window);
+                break;
+            }
+            Sleep(25);
+        }
+        if (!popupWindow) {
+            调试输出(L"FBro 实例设置窗口边界失败：实例浏览器尚未启动完成或窗口未就绪（弹窗需先经 FBro_实例打开原生UI 弹出）。");
+            return 0;
+        }
+        const UINT dpi = GetDpiForWindow(popupWindow);
+        const UINT effectiveDpi = dpi ? dpi : 96;
+        const int scaledX = ScaleForDpi(x, effectiveDpi);
+        const int scaledY = ScaleForDpi(y, effectiveDpi);
+        const int scaledWidth = ScaleForDpi(width, effectiveDpi);
+        const int scaledHeight = ScaleForDpi(height, effectiveDpi);
+        if (!SetWindowPos(popupWindow, nullptr, scaledX, scaledY, scaledWidth, scaledHeight, SWP_NOZORDER | SWP_NOACTIVATE)) return 0;
+        // 内核完成初始化时可能用默认布局覆盖一次：短暂复核，边界被改回就补设一次。
+        Sleep(150);
+        RECT actual = {};
+        if (IsWindow(popupWindow) && GetWindowRect(popupWindow, &actual)
+            && (actual.left != scaledX || actual.top != scaledY
+                || actual.right - actual.left != scaledWidth
+                || actual.bottom - actual.top != scaledHeight)) {
+            SetWindowPos(popupWindow, nullptr, scaledX, scaledY, scaledWidth, scaledHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 1;
+#else
+        (void)instanceId; (void)x; (void)y; (void)width; (void)height;
+        调试输出(L"FBro 不可用：无法设置实例窗口边界。");
+        return 0;
+#endif
     }
     int FBroVIP_实例应用指纹JSON(long long instanceId, const wchar_t* json) {
 #if LINGBUILDER_FBRO_AVAILABLE
@@ -18541,7 +18735,7 @@ ${generateFbroVipIndividualRuntime(false)}
 #endif
     }
 
-    int CEF3_创建弹窗浏览器(int instanceId, const wchar_t* address, const wchar_t* cacheDirectory, const wchar_t* proxyServer) {
+    int CEF3_创建弹窗浏览器(int instanceId, const wchar_t* address, const wchar_t* cacheDirectory, const wchar_t* proxyServer, int left = -1, int top = -1, int width = -1, int height = -1) {
 #if LINGBUILDER_CEF3_AVAILABLE
         if (instanceId <= 0) { 调试输出(L"CEF3 创建弹窗失败：实例编号必须为正整数。"); return 0; }
 #if LINGBUILDER_CEF3_BRIDGE_AVAILABLE
@@ -18575,15 +18769,22 @@ ${generateFbroVipIndividualRuntime(false)}
         instance->bridgeHandle = handle;
         instance->created = true;   // 同无头路径：bridgeReady 只能由「已就绪」确认或创建完成事件置位
         instance->currentUrl = bridgeConfig.initial_url ? bridgeConfig.initial_url : L"";
+        // 初始窗口边界：尾部可选参数，-1＝保持系统默认；坐标为屏幕物理像素。
+        // 创建任务与定界任务同在 CEF UI 任务队列按 FIFO 执行，定界在首帧绘制前生效。
+        if (left >= 0 || top >= 0 || width > 0 || height > 0) {
+            if (LB_CEF3_BrowserSetWindowBounds(handle, left, top, width, height) != LB_CEF3_OK) {
+                调试输出(L"CEF3 弹窗窗口边界设置失败：坐标须为屏幕物理像素，尺寸不得低于 Chrome 最小窗宽（尺寸只会被放大不会被裁切）。");
+            }
+        }
         cefBrowsers_[runtimeId] = std::move(instance);
         return 1;
 #else
-        (void)address; (void)cacheDirectory; (void)proxyServer;
+        (void)address; (void)cacheDirectory; (void)proxyServer; (void)left; (void)top; (void)width; (void)height;
         调试输出(L"CEF3 创建弹窗失败：当前构建未启用 CEF3 桥。");
         return 0;
 #endif
 #else
-        (void)instanceId; (void)address; (void)cacheDirectory; (void)proxyServer;
+        (void)instanceId; (void)address; (void)cacheDirectory; (void)proxyServer; (void)left; (void)top; (void)width; (void)height;
         调试输出(L"CEF3 不可用：构建环境缺少 CEF3 SDK。");
         return 0;
 #endif
@@ -20042,6 +20243,42 @@ ${generateFbroVipIndividualRuntime(false)}
         return found != cefBrowsers_.end() && found->second ? found->second->userAgent : L"";
 #else
         (void)instanceId; return L"";
+#endif
+    }
+
+    int CEF3_置实例窗口边界(int instanceId, int left, int top, int width, int height) {
+#if LINGBUILDER_CEF3_BRIDGE_AVAILABLE
+        auto found = cefBrowsers_.find(CEF3_运行时弹窗编号偏移 + instanceId);
+        if (found == cefBrowsers_.end() || !found->second->bridgeHandle) { 调试输出(L"CEF3 置实例窗口边界失败：该实例编号不存在或浏览器尚未创建。"); return 0; }
+        if (LB_CEF3_BrowserSetWindowBounds(found->second->bridgeHandle, left, top, width, height) != LB_CEF3_OK) { 调试输出(L"CEF3 置实例窗口边界失败：窗口边界命令仅支持 Chrome Runtime 顶层弹窗实例（区域布局归宿主管，无头无窗口）。"); return 0; }
+        return 1;
+#else
+        (void)instanceId; (void)left; (void)top; (void)width; (void)height; 调试输出(L"CEF3 置实例窗口边界失败：当前构建未启用 CEF3 桥。"); return 0;
+#endif
+    }
+
+    std::wstring CEF3_取实例窗口边界JSON(int instanceId) {
+#if LINGBUILDER_CEF3_BRIDGE_AVAILABLE
+        auto found = cefBrowsers_.find(CEF3_运行时弹窗编号偏移 + instanceId);
+        if (found == cefBrowsers_.end() || !found->second->bridgeHandle) { 调试输出(L"CEF3 取实例窗口边界失败：该实例编号不存在或浏览器尚未创建。"); return L"{}"; }
+        int x = 0, y = 0, w = 0, h = 0;
+        if (LB_CEF3_BrowserGetWindowBounds(found->second->bridgeHandle, &x, &y, &w, &h) != LB_CEF3_OK) { 调试输出(L"CEF3 取实例窗口边界失败：仅支持 Chrome Runtime 顶层弹窗实例，且需等弹窗窗口创建完成。"); return L"{}"; }
+        return L"{\\"x\\":" + std::to_wstring(x) + L",\\"y\\":" + std::to_wstring(y)
+            + L",\\"width\\":" + std::to_wstring(w) + L",\\"height\\":" + std::to_wstring(h) + L"}";
+#else
+        (void)instanceId; return L"{}";
+#endif
+    }
+
+    long long CEF3_取实例窗口句柄(int instanceId) {
+#if LINGBUILDER_CEF3_BRIDGE_AVAILABLE
+        auto found = cefBrowsers_.find(CEF3_运行时弹窗编号偏移 + instanceId);
+        if (found == cefBrowsers_.end() || !found->second->bridgeHandle) { 调试输出(L"CEF3 取实例窗口句柄失败：该实例编号不存在或浏览器尚未创建。"); return 0; }
+        unsigned long long nativeWindow = 0;
+        if (LB_CEF3_BrowserGetNativeWindowHandle(found->second->bridgeHandle, &nativeWindow) != LB_CEF3_OK) { 调试输出(L"CEF3 取实例窗口句柄失败：仅支持 Chrome Runtime 顶层弹窗实例，且需等弹窗窗口创建完成。"); return 0; }
+        return static_cast<long long>(nativeWindow);
+#else
+        (void)instanceId; return 0;
 #endif
     }
 
