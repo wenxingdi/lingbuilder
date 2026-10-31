@@ -34,6 +34,9 @@ class StreamService : Service() {
         const val ACTION_USB_DIRECT = "com.lingbuilder.companion.USB_DIRECT"
         /** 1.4.3：USB 直传自动重试（主界面轻量通道让位后由状态轮询触发；失败静默不弹 toast）。 */
         const val ACTION_AUTO_USB = "com.lingbuilder.companion.AUTO_USB"
+        /** 1.4.7：USB 控制模式（不推流）启动 extra——投屏授权照走，但不建 WS 不推帧，
+         *  仅保持 USB 通道 + lastJpeg 缓存供 screenshot 按需截图（找图群控不依赖持续推流）。 */
+        const val EXTRA_ON_DEMAND = "ondemand"
         /** 1.4.1：openAccessory 前的程序化授权回执 action（服务私有）。 */
         const val ACTION_USB_PERMISSION = "com.lingbuilder.companion.USB_PERMISSION_SVC"
         const val EXTRA_RESULT_CODE = "resultCode"
@@ -336,6 +339,7 @@ class StreamService : Service() {
         val savedQuality = prefs.getInt(KEY_QUALITY, 70).coerceIn(40, 90)
 
         serverError = ""
+        val onDemand = intent.getBooleanExtra(EXTRA_ON_DEMAND, false)
         val mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = try {
             mediaProjectionManager.getMediaProjection(resultCode, resultData)
@@ -345,26 +349,31 @@ class StreamService : Service() {
             return
         }
 
-        val wsServer = WsServer(
-            port = serverPort,
-            tokenProvider = { currentToken(this) },
-            onClientConnected = { clientCount = server?.clients?.size ?: 0 },
-            onClientDisconnected = { clientCount = server?.clients?.size ?: 0 },
-            onTextMessage = { _, text -> handleControlMessage(text) },
-        )
-        server = wsServer
-        wsServer.start()
-        if (!wsServer.isRunning()) {
-            serverError = "WebSocket 服务端启动失败（端口 $serverPort 可能被占用），请换端口后重试"
-            stopSelf()
-            return
+        if (!onDemand) {
+            val wsServer = WsServer(
+                port = serverPort,
+                tokenProvider = { currentToken(this) },
+                onClientConnected = { clientCount = server?.clients?.size ?: 0 },
+                onClientDisconnected = { clientCount = server?.clients?.size ?: 0 },
+                onTextMessage = { _, text -> handleControlMessage(text) },
+            )
+            server = wsServer
+            wsServer.start()
+            if (!wsServer.isRunning()) {
+                serverError = "WebSocket 服务端启动失败（端口 $serverPort 可能被占用），请换端口后重试"
+                stopSelf()
+                return
+            }
         }
 
         val stream = ScreenStream(
             this, projection,
             onFrame = { jpeg ->
-                lastFps = streamFpsSnapshot()
-                dispatchFrame(jpeg)
+                // 1.4.7 控制模式：不推流（lastJpeg 缓存由 ScreenStream 内部完成），帧仅按 screenshot 指令单发
+                if (!onDemand) {
+                    lastFps = streamFpsSnapshot()
+                    dispatchFrame(jpeg)
+                }
             },
             onScreenChanged = { broadcastScreenChanged() },
         ).also {
@@ -399,6 +408,22 @@ class StreamService : Service() {
             }
         }
 
+        // 1.4.7 控制模式（不推流）不启信标（无 WS 地址可广播），直接完成会话装配。
+        if (onDemand) {
+            running = true
+            instance = this
+            val filter = IntentFilter().apply {
+                addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED)
+                addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
+            }
+            usbReceiver = usbReceiverImpl
+            registerReceiver(usbReceiverImpl, filter)
+            registerReceiver(usbPermissionReceiver, IntentFilter(ACTION_USB_PERMISSION))
+            try { accessorySerial = usbManager.accessoryList?.firstOrNull()?.serial ?: "" } catch (_: Exception) {}
+            maybeAutoOpenUsbDirect()
+            AppLog.d("服务", "USB 控制模式已启动（不推流，按需截图）")
+            return
+        }
         // 投屏自动发现信标（v1.3.0）：会话存活期间每 3 秒广播连接串，PC 查看器免手抄自动接入。
         // ws 地址动态构造（端口各机不同、配对码可刷新），拿不到本机局域网 IP 时不广播。
         beacon = BeaconBroadcaster(
@@ -483,6 +508,76 @@ class StreamService : Service() {
                 "ping" -> replyControl(
                     "{\"type\":\"pong\",\"uptime\":" + android.os.SystemClock.elapsedRealtime() + "}",
                 )
+                "listApps" -> {
+                    // 1.4.6：枚举有启动入口的已装应用（{"cmd":"listApps"} → {"type":"appList","apps":[...]}），
+                    // PC 端填充「启动App」下拉。包可见性 <queries> 声明已含 MAIN+LAUNCHER，Android 11+ 可枚举。
+                    mainHandler.post {
+                        val json = try {
+                            val pm = applicationContext.packageManager
+                            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                            val infos = pm.queryIntentActivities(intent, 0)
+                            val arr = StringBuilder("[")
+                            var first = true
+                            for (info in infos) {
+                                val pkg = info.activityInfo?.packageName ?: continue
+                                if (pkg == applicationContext.packageName) continue
+                                val label = try { info.loadLabel(pm)?.toString() ?: pkg } catch (_: Exception) { pkg }
+                                if (!first) arr.append(",")
+                                first = false
+                                arr.append("{\"pkg\":\"").append(org.json.JSONObject.quote(pkg).trim('"'))
+                                arr.append("\",\"label\":\"").append(org.json.JSONObject.quote(label).trim('"')).append("\"}")
+                            }
+                            arr.append("]")
+                            "{\"type\":\"appList\",\"apps\":" + arr + "}"
+                        } catch (e: Exception) {
+                            null
+                        }
+                        if (json != null) {
+                            replyControl(json)
+                        } else {
+                            replyControl("{\"type\":\"result\",\"cmd\":\"listApps\",\"target\":\"\",\"ok\":false,\"error\":\"枚举应用失败\"}")
+                        }
+                    }
+                }
+                "screenshot" -> {
+                    // 1.4.7：按需截图——把 lastJpeg 经当前数据通道单发一帧（PC 泵照常收帧落盘）。
+                    // 投屏推流与 USB 控制模式（不推流）都可用；均未运行时回执中文错误。
+                    val stream = screenStream
+                    val shot = stream?.lastJpeg
+                    val channel = usbChannel
+                    if (shot == null) {
+                        replyControl("{\"type\":\"result\",\"cmd\":\"screenshot\",\"target\":\"\",\"ok\":false,\"error\":\"无可用的屏幕画面：请先开始投屏，或在伴侣上点「USB 控制模式」\"}")
+                    } else if (channel == null || !channel.isActive) {
+                        replyControl("{\"type\":\"result\",\"cmd\":\"screenshot\",\"target\":\"\",\"ok\":false,\"error\":\"USB 数据通道未激活\"}")
+                    } else {
+                        channel.sendVideoFrame(shot)
+                        replyControl("{\"type\":\"result\",\"cmd\":\"screenshot\",\"target\":\"\",\"ok\":true}")
+                    }
+                }
+                "setClipboard" -> {
+                    // 1.4.5：PC 侧中文输入路径的第一步——把文本写进系统剪贴板
+                    //（{"cmd":"setClipboard","text":"..."} → {"type":"result","cmd":"setClipboard","ok":true}）。
+                    // 粘贴动作由 PC 经 AOA 键盘注入 Ctrl+V 完成（HID 组合键）。
+                    val text = obj.optString("text", "")
+                    if (text.isEmpty()) {
+                        replyControl("{\"type\":\"result\",\"cmd\":\"setClipboard\",\"target\":\"\",\"ok\":false,\"error\":\"text 参数为空\"}")
+                    } else {
+                        mainHandler.post {
+                            val err = try {
+                                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("lb", text))
+                                null
+                            } catch (e: Exception) {
+                                "写入剪贴板失败：" + (e.message ?: e.javaClass.simpleName)
+                            }
+                            val sb = StringBuilder("{\"type\":\"result\",\"cmd\":\"setClipboard\",\"target\":\"\",\"ok\":")
+                            sb.append(if (err == null) "true" else "false")
+                            if (err != null) sb.append(",\"error\":\"").append(org.json.JSONObject.quote(err).trim('"')).append('"')
+                            sb.append('}')
+                            replyControl(sb.toString())
+                        }
+                    }
+                }
                 "usbDirect" -> {
                     // 1.4.1：PC 侧显式开关 USB 直传（{"cmd":"usbDirect","on":true|false}）。
                     // 回执经 replyControl 双路广播；在 USB 通道读循环线程上到达，post 到主线程执行。
